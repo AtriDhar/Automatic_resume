@@ -2,7 +2,7 @@
 
 This contains everything you need to run your app locally.
 
-
+This is just a prototype of the Idea majority of our objectives are defined in the SRS document provided in the root directory
 
 ## Run Locally
 
