@@ -1,0 +1,3 @@
+/* Intentionally minimal.
+   Tailwind is loaded via CDN in index.html; this file exists to satisfy the <link rel="stylesheet" href="/index.css"> reference.
+*/
