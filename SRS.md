@@ -159,3 +159,7 @@ The SRS describes a full **MCP-compliant multi-agent backend** (orchestrator + a
 ### **7.3 Data Handling Clarification (Prototype)**
 
 - The prototype is designed to avoid long-term storage in the app itself; however, **any third-party API calls (Gemini, Search tool)** may have their own retention policies outside this repo’s control.
+
+
+here are the api keys repo use and maintain code accordingly
+https://github.com/public-apis/public-apis
