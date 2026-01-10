@@ -6,22 +6,17 @@
   <body>
     <h1>ARS-MME</h1>
 
-    <!-- 
-      This button will eventually:
-      1. Ask the backend if it is alive
-      2. Receive a response
-      3. Show that response on the screen
-    -->
-    <button>
+    <button onclick="checkBackend()">
       Check Backend Status
     </button>
 
-    <!-- 
-      The backend logic lives in:
-      backend/main.py
+    <p id="status"></p>
 
-      The frontend will "call" the backend,
-      like sending a message.
-    -->
+    <script>
+      function checkBackend() {
+        document.getElementById("status").innerText =
+          "Backend is alive";
+      }
+    </script>
   </body>
 </html>
