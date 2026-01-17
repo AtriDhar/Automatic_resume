@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { GoogleGenAI } from "@google/genai";
+import { initResourceAgent, type ResourceConfig } from "./lib/resourceAgent";
+import { createEmbeddingsWorkerClient, type EmbeddingsClient } from "./lib/embeddings";
 
 // --- Icons (Inline SVGs) ---
 const Icons = {
@@ -82,10 +84,81 @@ const cosineSim = (a: Float32Array, b: Float32Array) => {
   return dot;
 };
 
+const registerServiceWorker = async () => {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    await navigator.serviceWorker.register('/sw.js');
+  } catch {
+    // ignore (PWA caching is best-effort)
+  }
+};
+
+type GenerateApiResponse = { text: string } | { error: string; detail?: string };
+
+const callGenerateApi = async (payload: {
+  prompt?: string;
+  parts?: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>;
+  model?: string;
+  responseMimeType?: 'application/json' | 'text/plain';
+  stream?: boolean;
+}) => {
+  const res = await fetch('/api/generate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (payload.stream) {
+    // Streaming path is handled separately in the flows that need it.
+    return res;
+  }
+
+  const json = (await res.json()) as GenerateApiResponse;
+  if (!('text' in json)) throw new Error(json.error || 'Generate API error');
+  return json.text;
+};
+
+const fetchMarketHtmlViaProxy = async (targetUrl: string) => {
+  const res = await fetch(`/api/market-scout?url=${encodeURIComponent(targetUrl)}`, {
+    method: 'GET',
+    headers: { 'accept': 'text/html' },
+  });
+  if (!res.ok) throw new Error(`market-scout proxy error (${res.status})`);
+  return await res.text();
+};
+
+const parseIndeedJobs = (html: string): Job[] => {
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const anchors = Array.from(doc.querySelectorAll('a')).filter(a => (a.getAttribute('href') || '').includes('/viewjob'));
+    const uniq = new Map<string, Job>();
+    let id = 1;
+    for (const a of anchors.slice(0, 25)) {
+      const title = (a.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!title || title.length < 4) continue;
+      const key = title.toLowerCase();
+      if (uniq.has(key)) continue;
+      uniq.set(key, {
+        id: id++,
+        title,
+        company: '(Parsed via Market Proxy)',
+        requirements: 'See listing (parsed HTML proxy)'
+      });
+      if (uniq.size >= 3) break;
+    }
+    return Array.from(uniq.values());
+  } catch {
+    return [];
+  }
+};
+
 // --- Live Application Logic ---
 
 const App = () => {
   const [workflow, setWorkflow] = useState<WorkflowMode>('expertise');
+
+  const [resourceConfig, setResourceConfig] = useState<ResourceConfig | null>(null);
+  const embeddingsClientRef = useRef<EmbeddingsClient | null>(null);
   
   // State
   const [userInput, setUserInput] = useState("Senior Frontend Engineer. 5 years exp. React, Node.js. Certified AWS Developer.");
@@ -126,6 +199,43 @@ const App = () => {
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
+
+  useEffect(() => {
+    // Browser-first bootstrap: SW (Cache API) + ResourceAgent selection
+    registerServiceWorker();
+    (async () => {
+      try {
+        const cfg = await initResourceAgent();
+        setResourceConfig(cfg);
+        addLog(`SYS: ResourceAgent > path=${cfg.path} (${cfg.reason}), score=${cfg.capability.score.toFixed(0)}.`);
+
+        if (cfg.path === 'local') {
+          // Start embeddings worker early (keeps UI responsive)
+          const client = createEmbeddingsWorkerClient(
+            new URL('./workers/embeddings.worker.ts', import.meta.url)
+          );
+          embeddingsClientRef.current = client;
+          addLog('SYS: Vector Engine > Web Worker initialized (Transformers.js).');
+        }
+      } catch (e) {
+        addLog(`WARN: ResourceAgent init failed; falling back to cloud. (${e})`);
+        setResourceConfig({
+          path: 'cloud',
+          reason: 'init-error',
+          embeddings: { mode: 'api' },
+          inference: { mode: 'api', apiUrl: '/api/generate' },
+          marketScout: { mode: 'proxy', apiUrl: '/api/market-scout' },
+          capability: { webgpuAvailable: false, deviceHighSpec: false, score: 0, network: {} },
+        });
+      }
+    })();
+
+    return () => {
+      embeddingsClientRef.current?.dispose();
+      embeddingsClientRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const addLog = (msg: string) => {
     const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -169,26 +279,96 @@ const App = () => {
   }, []);
 
   const getAI = () => {
-      if (!process.env.API_KEY) {
-          addLog("ERROR: No API Key found.");
-          return null;
-      }
+      // Legacy path: keep Gemini client-side only for local dev / prototype.
+      // Production path uses /api/generate (serverless/edge) to avoid exposing API keys.
+      if (!process.env.API_KEY) return null;
       return new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
 
-  const verifyCredentialsNow = async (profileText: string) => {
-    const ai = getAI();
-    if (!ai) return;
+  const llmText = async (prompt: string, responseMimeType?: 'application/json' | 'text/plain') => {
+    // Prefer serverless proxy when available. If it fails (e.g., local dev without Netlify), fall back to client-side Gemini.
+    try {
+      const text = await callGenerateApi({ prompt, responseMimeType });
+      if (typeof text === 'string') return text;
+      throw new Error('Unexpected generate API response');
+    } catch {
+      const ai = getAI();
+      if (!ai) throw new Error('No API available (missing API key and /api/generate unreachable)');
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: responseMimeType ? { responseMimeType } : undefined,
+      });
+      return response.text;
+    }
+  };
 
+  const llmStreamText = async (systemInstruction: string, message: string, onChunk: (t: string) => void) => {
+    // Streaming requirement: attempt SSE via /api/generate; fallback to Gemini stream.
+    try {
+      const res = (await callGenerateApi({
+        prompt: `${systemInstruction}\n\n${message}`,
+        stream: true,
+      })) as Response;
+
+      if (!res.ok || !res.body) throw new Error('Streaming unavailable');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Gemini SSE emits "data: {json}\n\n"; extract partial text if present.
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        for (const evt of events) {
+          const line = evt.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          const jsonStr = line.slice('data: '.length).trim();
+          if (!jsonStr || jsonStr === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const t = parsed?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text ?? '').join('') ?? '';
+            if (t) onChunk(t);
+          } catch {
+            // ignore parse errors
+          }
+        }
+      }
+      return;
+    } catch {
+      const ai = getAI();
+      if (!ai) throw new Error('No streaming API available');
+      const chat = ai.chats.create({
+        model: 'gemini-2.5-flash',
+        config: { systemInstruction },
+      });
+      const stream = await chat.sendMessageStream({ message });
+      for await (const chunk of stream) onChunk(chunk.text);
+    }
+  };
+
+  const embedSmart = async (text: string) => {
+    // Local-first: use worker embeddings if initialized; else fall back to deterministic prototype embed.
+    const client = embeddingsClientRef.current;
+    if (resourceConfig?.path === 'local' && client) {
+      return await client.embed(text);
+    }
+    return embedText(text);
+  };
+
+  const verifyCredentialsNow = async (profileText: string) => {
     const summaryHash = simpleHash(profileText);
     setVerification({ status: 'working' });
     setAgentStatus(prev => ({ ...prev, verifier: 'working' }));
     addLog('AGNT: Verifier > Validating credentials (immediate)...');
 
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `You are a credential verifier.
+      const text = await llmText(
+        `You are a credential verifier.
 Given ONLY the following candidate profile text, determine whether certification claims are plausibly verifiable.
 
 Return STRICT JSON with keys:
@@ -197,10 +377,10 @@ Return STRICT JSON with keys:
 - reason: short string
 
 Profile text:\n${profileText}`,
-        config: { responseMimeType: 'application/json' }
-      });
+        'application/json'
+      );
 
-      const parsed = JSON.parse(response.text) as { status: 'verified' | 'failed'; confidence: number; reason: string };
+      const parsed = JSON.parse(text) as { status: 'verified' | 'failed'; confidence: number; reason: string };
       if (parsed.status === 'verified') {
         setVerification({ status: 'verified', confidence: parsed.confidence ?? 1, summaryHash });
         setAgentStatus(prev => ({ ...prev, verifier: 'success' }));
@@ -223,9 +403,6 @@ Profile text:\n${profileText}`,
       const file = e.target.files?.[0];
       if (!file) return;
 
-      const ai = getAI();
-      if (!ai) return;
-
       setAgentStatus(prev => ({...prev, ingestion: 'working'}));
       addLog(`AGNT: Ingestion > Reading ${file.name}...`);
       setIsProcessing(true);
@@ -234,18 +411,32 @@ Profile text:\n${profileText}`,
       reader.onloadend = async () => {
           const base64Data = (reader.result as string).split(',')[1];
           try {
-              const model = ai.models.generateContent; // correct method access is via instance
-              // Correct usage according to instructions
-              const response = await ai.models.generateContent({
+              let nextText: string;
+
+              try {
+                nextText = await callGenerateApi({
+                  parts: [
+                    { inlineData: { mimeType: file.type, data: base64Data } },
+                    { text: "OCR and Summarize: Extract the candidate's core skills, years of experience, and certifications from this document. Return a plain text summary." }
+                  ],
+                  responseMimeType: 'text/plain'
+                }) as unknown as string;
+              } catch {
+                // Final fallback: client-side Gemini if explicitly enabled (dev only).
+                const ai = getAI();
+                if (!ai) throw new Error('OCR requires /api/generate or a client API key (GEMINI_API_KEY + EXPOSE_CLIENT_GEMINI_KEY=true)');
+                const response = await ai.models.generateContent({
                   model: 'gemini-2.5-flash',
                   contents: {
-                      parts: [
-                          { inlineData: { mimeType: file.type, data: base64Data } },
-                          { text: "OCR and Summarize: Extract the candidate's core skills, years of experience, and certifications from this document. Return a plain text summary." }
-                      ]
+                    parts: [
+                      { inlineData: { mimeType: file.type, data: base64Data } },
+                      { text: "OCR and Summarize: Extract the candidate's core skills, years of experience, and certifications from this document. Return a plain text summary." }
+                    ]
                   }
-              });
-                const nextText = response.text;
+                });
+                nextText = response.text;
+              }
+
                 setUserInput(nextText);
               addLog("AGNT: Ingestion > OCR Complete. Profile updated.");
               setAgentStatus(prev => ({...prev, ingestion: 'success'}));
@@ -263,9 +454,6 @@ Profile text:\n${profileText}`,
   };
 
   const runExpertiseFlow = async () => {
-    const ai = getAI();
-    if (!ai) return;
-    
     setIsProcessing(true);
     setLogs([]);
     setResumeOutput("");
@@ -290,36 +478,30 @@ Profile text:\n${profileText}`,
 
       // 2. Market Scout
       addLog("AGNT: Scout > Identifying global trends...");
-      const scoutRes = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `Find 3 trending skills for a role described as: "${userInput}". List them.`,
-        config: { tools: [{ googleSearch: {} }] }
-      });
-      const trends = scoutRes.text;
+      const trends = await llmText(`Find 3 trending skills for a role described as: "${userInput}". List them.`);
       addLog(`AGNT: Scout > Trends: ${trends}`);
       setAgentStatus(prev => ({ ...prev, scout: "success", analyst: "working" }));
 
       // 3. Vector Analyst
       addLog("AGNT: Analyst > Computing Vector Embeddings...");
-      const userVec = embedText(userInput);
-      const trendVec = embedText(trends);
-      const score = (cosineSim(userVec, trendVec) * 100).toFixed(1);
+      const userVec = await embedSmart(userInput);
+      const trendVec = await embedSmart(trends);
+      const score = (cosineSim(userVec as any, trendVec as any) * 100).toFixed(1);
       addLog(`AGNT: Analyst > Match Score: ${score}%`);
       setAgentStatus(prev => ({ ...prev, analyst: "success", synthesizer: "working" }));
 
       // 4. Synthesizer
       addLog("AGNT: Synthesizer > Stream generating...");
-      const chat = ai.chats.create({
-        model: 'gemini-2.5-flash',
-        config: { systemInstruction: "Write a high-impact resume summary (max 150 words) incorporating the user profile and these market trends." }
-      });
-      const stream = await chat.sendMessageStream({ message: `Profile: ${userInput}\nTrends: ${trends}` });
-      
       let fullText = "";
-      for await (const chunk of stream) {
-        fullText += chunk.text;
-        setResumeOutput(fullText);
-      }
+
+      await llmStreamText(
+        "Write a high-impact resume summary (max 150 words) incorporating the user profile and these market trends.",
+        `Profile: ${userInput}\nTrends: ${trends}`,
+        (t) => {
+          fullText += t;
+          setResumeOutput(fullText);
+        }
+      );
 
       // If verification was overridden, prepend disclaimer
       if (verification.status === 'overridden') {
@@ -335,9 +517,6 @@ Profile text:\n${profileText}`,
   };
 
   const scanMarket = async () => {
-    const ai = getAI();
-    if (!ai) return;
-
     setIsProcessing(true);
     setAvailableJobs([]);
     setSelectedJob(null);
@@ -347,14 +526,30 @@ Profile text:\n${profileText}`,
     addLog(`AGNT: Scout > Scanning live market for "${marketIndustry}"...`);
     
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: `Find 3 currently active or realistic high-demand job listings for the industry: "${marketIndustry}". 
-            Return strictly a JSON array with objects containing: "id" (number), "title", "company", "requirements" (short string).`,
-             config: { responseMimeType: "application/json" }
-        });
-        
-        const jobs = JSON.parse(response.text);
+        // Browser-first market proxy: fetch raw HTML via /api/market-scout and parse client-side.
+        // Note: real job boards may block automated fetches; fall back to LLM/cached/fallback list.
+        try {
+          const q = encodeURIComponent(marketIndustry);
+          const html = await fetchMarketHtmlViaProxy(`https://www.indeed.com/jobs?q=${q}`);
+          const parsedJobs = parseIndeedJobs(html);
+          if (parsedJobs.length) {
+            setAvailableJobs(parsedJobs);
+            marketCacheRef.current[marketIndustry] = { jobs: parsedJobs, cachedAtIso: new Date().toISOString() };
+            addLog(`AGNT: Scout > Parsed ${parsedJobs.length} jobs via Market Proxy.`);
+            setAgentStatus(prev => ({ ...prev, scout: "success" }));
+            return;
+          }
+        } catch {
+          // ignore and fall back
+        }
+
+        const text = await llmText(
+          `Find 3 currently active or realistic high-demand job listings for the industry: "${marketIndustry}".
+Return strictly a JSON array with objects containing: "id" (number), "title", "company", "requirements" (short string).`,
+          'application/json'
+        );
+
+        const jobs = JSON.parse(text);
         setAvailableJobs(jobs);
         marketCacheRef.current[marketIndustry] = { jobs, cachedAtIso: new Date().toISOString() };
         addLog(`AGNT: Scout > Found ${jobs.length} open positions.`);
@@ -382,23 +577,19 @@ Profile text:\n${profileText}`,
   };
 
   const analyzeGap = async (job: Job) => {
-    const ai = getAI();
-    if (!ai) return;
-
     setSelectedJob(job);
     setAgentStatus(prev => ({ ...prev, analyst: "working" }));
     addLog(`AGNT: Analyst > Gap Analysis for ${job.title}...`);
 
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: `Compare User Profile: "${userInput}" 
-            vs Job Requirements: "${job.requirements}".
-            Identify up to 3 missing key skills or qualifications.
-            Return a JSON array of strings (the missing skills). If none, return empty array.`,
-            config: { responseMimeType: "application/json" }
-        });
-        const gaps = JSON.parse(response.text);
+        const text = await llmText(
+          `Compare User Profile: "${userInput}" 
+vs Job Requirements: "${job.requirements}".
+Identify up to 3 missing key skills or qualifications.
+Return a JSON array of strings (the missing skills). If none, return empty array.`,
+          'application/json'
+        );
+        const gaps = JSON.parse(text);
         setMissingSkills(gaps);
         if (gaps.length > 0) {
              addLog(`AGNT: Analyst > Detected ${gaps.length} skill gaps.`);
@@ -412,33 +603,29 @@ Profile text:\n${profileText}`,
   };
 
   const synthesizeMarketResume = async () => {
-      const ai = getAI();
-      if (!ai || !selectedJob) return;
+      if (!selectedJob) return;
 
       setIsProcessing(true);
       setAgentStatus(prev => ({ ...prev, synthesizer: "working" }));
       addLog("AGNT: Synthesizer > Bridging gaps and generating tailored resume...");
 
       try {
-          const chat = ai.chats.create({
-              model: 'gemini-2.5-flash',
-              config: { systemInstruction: "You are an expert Resume Strategist. Create a tailored resume summary that positions the candidate for the specific job, incorporating their new gap-fill explanation seamlessly." }
-          });
-          
-          const stream = await chat.sendMessageStream({ 
-              message: `Target Job: ${selectedJob.title} at ${selectedJob.company}
-              Requirements: ${selectedJob.requirements}
-              Candidate Profile: ${userInput}
-              Gap Explanation (Dynamic Interview): ${gapResponse}
-              
-              Generate the resume summary now.` 
-          });
-
           let fullText = "";
-          for await (const chunk of stream) {
-              fullText += chunk.text;
-              setResumeOutput(fullText);
+
+          await llmStreamText(
+          "You are an expert Resume Strategist. Create a tailored resume summary that positions the candidate for the specific job, incorporating their new gap-fill explanation seamlessly.",
+          `Target Job: ${selectedJob.title} at ${selectedJob.company}
+    Requirements: ${selectedJob.requirements}
+    Candidate Profile: ${userInput}
+    Gap Explanation (Dynamic Interview): ${gapResponse}
+
+    Generate the resume summary now.`,
+          (t) => {
+            fullText += t;
+            setResumeOutput(fullText);
           }
+          );
+
           setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
       } catch (e) {
           addLog(`ERR: Synthesis failed > ${e}`);

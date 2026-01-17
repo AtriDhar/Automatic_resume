@@ -53,18 +53,209 @@ The system functions as a web-based interface backed by a **Multi-Agent System (
 
 ## **3\. System Architecture & Agentic Design**
 
-_Fabricated based on "Any possible architecture in the vast space of agentic AI"_
+The system shall utilize a **Browser-First Hybrid Topology** with **Latency-Based Dynamic Resource Pooling**, designed to function entirely within a standard web browser environment (SPA/PWA). Serverless/Edge functions (Vercel/Netlify) are used strictly as fallbacks and for CORS-bypass reverse proxying.
 
-The system shall utilize a **Hub-and-Spoke Agentic Topology** governed by MCP.
+### **3.1 Client-Side Orchestrator (ResourceAgent / “The Brain”)**
 
-### **3.1 The Agent Swarm**
+The system shall implement a client-side orchestrator as a logic layer running in the browser (e.g., React Context/Hook).
 
-- **Orchestrator Agent (The Brain):** Routes user intent to Form 1 or Form 2 workflows.
-- **Ingestion Agent (Multi-Modal):** Capable of OCR (Optical Character Recognition) to read uploaded certificates (PDF/JPG) and parse user descriptions.
-- **Verifier Agent:** Cross-references uploaded certifications against known issuer databases or heuristic validity checks.
-- **Market Scout Agent:** Performs real-time RAG operations, scraping current job listings and "Top Demand" posts.
-- **Vector Analyst Agent:** Maps User Skills (\$\\vec{U}\$) and Job Requirements (\$\\vec{J}\$) into high-dimensional space to calculate Cosine Similarity.
-- **Synthesizer Agent:** The LLM writer that generates the final PDF/Docx.
+- **Responsibilities:**
+  - Route user intent to Expertise Mode (Form 1) or Market Mode (Form 2).
+  - Manage agent lifecycle and UI status signals (e.g., “Hydrating Model…”, “Embedding…”, “Generating…”, “Falling back to Cloud…”).
+  - Enforce a latency budget and select the optimal compute path (Local vs Cloud) per session.
+
+#### **3.1.1 The Profiler Handshake (CapabilityScore)**
+
+On application load, the ResourceAgent shall perform a profiler handshake using browser-native signals to assign a **CapabilityScore**.
+
+- **GPU capability:** `navigator.gpu` availability (WebGPU).
+- **Network hints:** `navigator.connection` (effectiveType / downlink / rtt / saveData).
+- **CPU/memory hints (best-effort):** `navigator.hardwareConcurrency`, `navigator.deviceMemory`.
+
+The ResourceAgent shall select:
+
+- **IF** (WebGPU_Available **AND** Device_HighSpec) → **Path A (Local-First)**
+- **ELSE** → **Path B (Serverless Fallback)**
+
+### **3.2 Path A: Browser-Native Intelligence (Local-First)**
+
+When Path A is selected, the system shall run AI workloads in the browser to reduce server cost and avoid server-side latency.
+
+- **Vector Engine (Embeddings):**
+  - Use Transformers.js inside a **Web Worker** to generate embeddings for resumes/jobs.
+  - The worker must be used to avoid blocking the UI main thread.
+
+- **Inference Engine (Generation):**
+  - Use WebLLM backed by **WebGPU** to run a quantized model (e.g., Llama-3-8B-Quantized or similar) inside the browser tab.
+
+- **Model Caching (Mandatory):**
+  - Persist model weights via the **Browser Cache API** (not LocalStorage).
+  - The system should use a Service Worker (or equivalent caching layer) to enable model re-use across sessions and eliminate repeated download latency.
+
+- **Local Zero-Retention:**
+  - User documents, extracted text, embeddings, and intermediate artifacts must remain in transient browser storage (RAM and/or IndexedDB) and must be purged on session end (tab close) and on timeout.
+
+### **3.3 Path B: Serverless/Edge Fallback (Cloud Path)**
+
+When Path B is selected (or when Path A fails), the system shall use serverless/edge functions as a stateless fallback.
+
+- **Inference Proxy (`/api/generate`):**
+  - A Next.js API Route (or Netlify Function equivalent) shall proxy requests to an external provider (Gemini/OpenAI/etc.).
+  - The endpoint must support **streaming responses** (e.g., SSE or chunked transfer) to:
+    - Return tokens incrementally to the client.
+    - Keep serverless execution under platform timeouts.
+
+- **Market Proxy (`/api/market-scout`):**
+  - A Next.js API Route (or Netlify Function equivalent) shall act as a **Reverse Proxy** to bypass CORS constraints for job board pages.
+  - The endpoint shall return raw HTML to the client for parsing and extraction.
+
+#### **3.3.1 Serverless Time Budget Constraint**
+
+To remain compatible with typical Vercel/Netlify serverless defaults (e.g., ~10 seconds), serverless functions shall be designed to:
+
+- Perform only short-lived network fetch + streaming.
+- Avoid long-running “agent loops” on the server.
+- Defer heavy compute (embedding, ranking, long generation) to the client whenever possible.
+
+### **3.4 Zero-Retention & Privacy (Hybrid Enforcement)**
+
+- **Local path:** Processing occurs inside the browser; artifacts are stored only ephemerally (RAM/IndexedDB) and cleared on session end.
+- **Serverless path:** Functions are stateless and must not persist request bodies or derived user data.
+  - The implementation shall avoid logging PII payloads.
+  - Where platform controls exist, request logging for these endpoints should be minimized/disabled and/or sensitive fields should be redacted client-side prior to transmission.
+
+### **3.5 Pseudo-Code Control Flow (ResourceAgent)**
+
+```ts
+// ResourceAgent: browser-first dynamic resource pooling
+// Goal: choose Local (WebGPU/WebLLM + Worker embeddings) or Cloud (serverless) based on capability + latency.
+
+type ComputePath = "local" | "cloud";
+
+type CapabilityScore = {
+  webgpuAvailable: boolean;
+  deviceHighSpec: boolean;
+  score: number; // higher = better
+  network: {
+    effectiveType?: string;
+    downlinkMbps?: number;
+    rttMs?: number;
+    saveData?: boolean;
+  };
+};
+
+type ResourceConfig = {
+  path: ComputePath;
+  embeddings: {
+    mode: "worker" | "api";
+    workerUrl?: string;
+  };
+  inference: {
+    mode: "webllm" | "api";
+    apiUrl?: string; // /api/generate
+  };
+  marketScout: {
+    mode: "client" | "proxy";
+    apiUrl?: string; // /api/market-scout
+  };
+};
+
+const LOCAL_MIN_SCORE = 70;
+const MODEL_HYDRATION_BUDGET_MS = 45_000; // local-only budget; if exceeded, fall back
+
+export async function initResourceAgent(): Promise<ResourceConfig> {
+  const cap = await profileCapability();
+
+  // Primary decision gate
+  const preferLocal = cap.webgpuAvailable && cap.deviceHighSpec && cap.score >= LOCAL_MIN_SCORE;
+
+  if (preferLocal) {
+    const ok = await tryInitLocalWithinBudget(MODEL_HYDRATION_BUDGET_MS);
+    if (ok) {
+      return {
+        path: "local",
+        embeddings: { mode: "worker", workerUrl: "/workers/embeddings.worker.js" },
+        inference: { mode: "webllm" },
+        marketScout: { mode: "proxy", apiUrl: "/api/market-scout" },
+      };
+    }
+  }
+
+  // Cloud fallback (device too weak OR local init too slow/fails)
+  return {
+    path: "cloud",
+    embeddings: { mode: "api" }, // optional: can still do worker embeddings if cheap
+    inference: { mode: "api", apiUrl: "/api/generate" },
+    marketScout: { mode: "proxy", apiUrl: "/api/market-scout" },
+  };
+}
+
+async function profileCapability(): Promise<CapabilityScore> {
+  const webgpuAvailable = typeof (navigator as any).gpu !== "undefined";
+  const connection = (navigator as any).connection;
+
+  const cores = navigator.hardwareConcurrency ?? 4;
+  const mem = (navigator as any).deviceMemory ?? 4;
+
+  const effectiveType = connection?.effectiveType;
+  const downlinkMbps = connection?.downlink;
+  const rttMs = connection?.rtt;
+  const saveData = !!connection?.saveData;
+
+  // Simple scoring heuristic (tunable)
+  let score = 0;
+  score += webgpuAvailable ? 40 : 0;
+  score += Math.min(cores, 16) * 2;
+  score += Math.min(mem, 16) * 2;
+  score -= saveData ? 10 : 0;
+
+  const deviceHighSpec = webgpuAvailable && cores >= 8 && mem >= 8;
+
+  return {
+    webgpuAvailable,
+    deviceHighSpec,
+    score,
+    network: { effectiveType, downlinkMbps, rttMs, saveData },
+  };
+}
+
+async function tryInitLocalWithinBudget(budgetMs: number): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+
+  try {
+    // 1) Ensure model assets are in Cache API (first-run may download)
+    //    (Implementation detail: service worker fetch handler + cache.addAll for model URLs)
+    await ensureModelCached({ deadline });
+
+    // 2) Start embeddings worker
+    await startEmbeddingsWorker({ deadline });
+
+    // 3) Initialize WebLLM runtime (WebGPU)
+    await initWebLLM({ deadline });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureModelCached(_: { deadline: number }): Promise<void> {
+  // Pseudocode only:
+  // const cache = await caches.open("ars-mme-models-v1");
+  // if (!(await cache.match(modelUrl))) await cache.add(modelUrl);
+}
+
+async function startEmbeddingsWorker(_: { deadline: number }): Promise<void> {
+  // Pseudocode only:
+  // const worker = new Worker("/workers/embeddings.worker.js", { type: "module" });
+  // await handshake(worker);
+}
+
+async function initWebLLM(_: { deadline: number }): Promise<void> {
+  // Pseudocode only:
+  // await webllm.init({ model: "Llama-3-8B-quant", device: "webgpu" });
+}
+```
 
 ## **4\. Functional Requirements**
 
@@ -102,17 +293,47 @@ The system shall utilize a **Hub-and-Spoke Agentic Topology** governed by MCP.
 
 ### **5.1 Performance**
 
-- **Latency:** Resume generation (including RAG research) must complete within **< 300 seconds**. (ample time to deal with all the resource gathering and failures of any sorts, and retrying)
-- **Concurrency:** The architecture must support horizontal scaling of Agents (using Kubernetes or Serverless functions) to handle spikes in traffic.
+The system’s performance requirements shall distinguish **Model Hydration Time** (first-time download + initialization) from **Inference Time** (actual generation work), since compute may occur locally in the browser.
+
+- **Definitions**
+  - **Model Hydration Time (MHT):** Time to download model weights (if not cached) + initialize runtime (WebLLM/worker).
+  - **Inference Time (IT):** Time from “Generate” action to first token (TTFT) and to completion.
+  - **End-to-End Time (E2E):** $E2E = MHT + IT + MarketFetchTime + ClientPostProcessing$.
+
+- **Targets (Browser-First)**
+  - **Returning visitors (cached weights):** MHT should be minimized via Cache API reuse; the system should enter a “ready-to-generate” state without re-downloading model weights.
+  - **First visit (uncached):** MHT may be dominated by download bandwidth; the UI must provide progressive status feedback during hydration.
+
+- **Serverless Timeout Compatibility**
+  - Any serverless/edge function invocation (e.g., `/api/generate`, `/api/market-scout`) must be designed to complete within platform defaults (e.g., ~10 seconds) by:
+    - Using **streaming responses** for generation.
+    - Keeping server-side work limited to proxying/fetching.
+
+- **Concurrency/Scaling**
+  - Heavy compute is primarily shifted to the client; serverless endpoints must be horizontally scalable and stateless.
 
 ### **5.2 Security**
 
-- **Data Privacy:** Strict adherence to "Privacy by Design." No user documents are written to disk; processing occurs in RAM.
+- **Data Privacy (Browser-First):**
+  - On the local path, user documents and derived artifacts (OCR text, embeddings, drafts) shall be processed in-browser and retained only ephemerally (RAM/IndexedDB) with purge-on-timeout and purge-on-tab-close behavior.
+  - Model weights may be cached in the Browser Cache API; this cache must contain only model assets, not user documents.
+
+- **Serverless Zero-Retention:**
+  - Serverless endpoints shall be stateless and must not persist request payloads or derived PII.
+  - The implementation must avoid emitting PII in logs; sensitive fields should be redacted/minimized.
+
 - **Transmission:** All data in transit must be encrypted via TLS 1.3.
 
 ### **5.3 Reliability**
 
-- **Fallback:** If the **Market Scout Agent** fails to reach live job boards, it must fall back to a cached dataset of "Last known top jobs" (updated hourly).
+- **Compute Path Fallback:**
+  - If WebGPU is unavailable, local model initialization fails, or hydration exceeds the configured budget, the system shall fall back from Path A (Local) to Path B (Cloud).
+
+- **Market Fallback:**
+  - If live market retrieval fails, the system shall fall back to a cached dataset of “Last known top jobs” (updated hourly) and then to a built-in minimal fallback list.
+
+- **Degraded Mode:**
+  - If the Market Proxy is unavailable, the system may continue with resume synthesis using only user-provided inputs.
 
 ## **6\. Interface Requirements**
 

@@ -1,0 +1,21 @@
+# Render Blueprint Configuration
+# https://render.com/docs/blueprint-spec
+
+services:
+  # Market Scout Agent - Pre-Processing Factory
+  - type: web
+    name: market-scout-agent
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    region: oregon  # Choose closest to your users
+    healthCheckPath: /health
+    envVars:
+      - key: FRONTEND_URL
+        value: https://your-frontend.vercel.app  # Update with your frontend URL
+      - key: PORT
+        value: 8000
+    scaling:
+      minInstances: 0  # Allow spin-down on free tier
+      maxInstances: 1

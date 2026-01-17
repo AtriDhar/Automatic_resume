@@ -3,6 +3,14 @@
   command = "npm run build"
   publish = "dist"
 
+[[edge_functions]]
+  path = "/api/generate"
+  function = "generate"
+
+[[edge_functions]]
+  path = "/api/market-scout"
+  function = "market-scout"
+
 # Optional: keep builds consistent across CI
 #[build.environment]
 #  NODE_VERSION = "20"
