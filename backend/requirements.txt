@@ -1,0 +1,27 @@
+# Market Scout Agent Dependencies
+# Optimized for Render Free Tier (512MB RAM / 0.1 CPU)
+# NO heavy ML dependencies (embeddings done client-side)
+
+# Web Framework
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+
+# HTTP Client for scraping
+httpx==0.26.0
+aiohttp==3.9.3
+
+# HTML Parsing (lightweight)
+beautifulsoup4==4.12.3
+lxml==5.1.0
+
+# NLP Preprocessing (lightweight - NO spacy, NO transformers)
+nltk==3.8.1
+
+# Rate limiting & caching
+cachetools==5.3.2
+
+# Environment variables
+python-dotenv==1.0.1
+
+# CORS support
+# (included in fastapi)

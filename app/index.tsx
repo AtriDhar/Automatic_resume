@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { GoogleGenAI } from "@google/genai";
+import { initResourceAgent, type ResourceConfig } from "./lib/resourceAgent";
+import { createEmbeddingsWorkerClient, type EmbeddingsClient } from "./lib/embeddings";
 
 // --- Icons (Inline SVGs) ---
 const Icons = {
@@ -18,79 +20,6 @@ const Icons = {
   Alert: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
 };
 
-// --- Architectural Specs ---
-const ARCHITECTURE_DOCS = [
-  {
-    id: "critique",
-    title: "Step 1: Architectural Critique",
-    icon: <Icons.Activity />,
-    content: `### Hub-and-Spoke Topology Analysis
-
-**The Risk:** In a strictly asynchronous Hub-and-Spoke model, the "Market Scout" and "Verifier" agents might operate blindly relative to each other. If the Scout begins aggregating job market data before the Verifier has confirmed the validity of the user's core certifications, we risk "hallucinated relevance"—optimizing a resume for a job the user isn't actually qualified for.
-
-**Race Condition Prevention Strategy:**
-1.  **State-Gated Execution (LangGraph):** Implement a strict conditional edge in the LangGraph orchestration. The \`Market Scout\` node should only trigger *after* the \`Verifier\` returns a \`status: verified\` signal.
-2.  **Optimistic Concurrency with Rollback:** Alternatively, allow parallel execution (for latency) but tag Scout results as "pending_verification". If Verifier fails, the orchestration layer discards the Scout's branch immediately (the "Fail Fast" principle).`
-  },
-  {
-    id: "mcp",
-    title: "Step 3: MCP Interface (Verifier Agent)",
-    icon: <Icons.Code />,
-    language: "python",
-    content: `from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
-from typing import Optional, Dict
-
-mcp = FastMCP("VerifierAgent")
-
-class VerificationRequest(BaseModel):
-    credential_id: str = Field(..., description="Hash or ID of the cert")
-    issuer_domain: str = Field(..., description="e.g., 'coursera.org'")
-
-@mcp.tool("verify_credential")
-async def verify_credential(data: VerificationRequest) -> Dict:
-    """Verifies a digital credential against known issuers."""
-    try:
-        is_valid = perform_lookup(data.credential_id, data.issuer_domain)
-        if is_valid:
-            return {"status": "verified", "confidence": 1.0}
-        else:
-            return {"status": "failed", "reason": "Issuer signature mismatch"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}`
-  },
-  {
-    id: "vector",
-    title: "Step 4: Vector Analyst (Batch Optimization)",
-    icon: <Icons.Cpu />,
-    language: "python",
-    content: `import numpy as np
-
-def batch_cosine_similarity(user_vector: np.ndarray, job_matrix: np.ndarray) -> np.ndarray:
-    """
-    Optimized Vector Matching for 'Vector Analyst Agent'.
-    S = (A . B) / (||A|| * ||B||)
-    """
-    norm_user = np.linalg.norm(user_vector)
-    norm_jobs = np.linalg.norm(job_matrix, axis=1)
-    dot_products = np.dot(job_matrix, user_vector)
-    similarities = dot_products / (norm_user * norm_jobs + 1e-9)
-    return similarities`
-  },
-  {
-    id: "db",
-    title: "Step 5: Ephemeral Data (PostgreSQL)",
-    icon: <Icons.Database />,
-    language: "python",
-    content: `class UserMetadata(Base):
-    """Stores session metadata ONLY. Strictly NO PII, NO Resume Text."""
-    __tablename__ = 'user_session_metadata'
-    session_id = Column(String(64), primary_key=True)
-    expires_at = Column(DateTime, nullable=False)
-    # Data automatically purged by background worker`
-  }
-];
-
 // --- Types ---
 type WorkflowMode = 'expertise' | 'market';
 type AgentStatus = 'idle' | 'working' | 'success' | 'error';
@@ -101,17 +30,150 @@ interface Job {
   requirements: string;
 }
 
+type VerificationState =
+  | { status: 'idle' | 'working' }
+  | { status: 'verified'; confidence: number; summaryHash: string }
+  | { status: 'failed'; reason: string; summaryHash: string }
+  | { status: 'overridden'; reason: string; disclaimer: string; summaryHash: string };
+
+const SESSION_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_DISCLAIMER = "Disclaimer: Automatic credential verification was inconclusive. Any certification claims should be treated as candidate-provided.";
+
+const normalizeTokens = (text: string) =>
+  (text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+const simpleHash = (text: string) => {
+  // Non-cryptographic hash (UI / demo only). Avoids storing the raw string.
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+
+const embedText = (text: string, dims = 256) => {
+  // Deterministic hashed bag-of-words embedding (client-only prototype).
+  const vec = new Float32Array(dims);
+  const tokens = normalizeTokens(text);
+  for (const t of tokens) {
+    let h = 2166136261;
+    for (let i = 0; i < t.length; i++) {
+      h ^= t.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    const idx = (h >>> 0) % dims;
+    vec[idx] += 1;
+  }
+  // L2 normalize
+  let norm = 0;
+  for (let i = 0; i < vec.length; i++) norm += vec[i] * vec[i];
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < vec.length; i++) vec[i] = vec[i] / norm;
+  return vec;
+};
+
+const cosineSim = (a: Float32Array, b: Float32Array) => {
+  const len = Math.min(a.length, b.length);
+  let dot = 0;
+  for (let i = 0; i < len; i++) dot += a[i] * b[i];
+  return dot;
+};
+
+const registerServiceWorker = async () => {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    await navigator.serviceWorker.register('/sw.js');
+  } catch {
+    // ignore (PWA caching is best-effort)
+  }
+};
+
+type GenerateApiResponse = { text: string } | { error: string; detail?: string };
+
+const callGenerateApi = async (payload: {
+  prompt?: string;
+  parts?: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>;
+  model?: string;
+  responseMimeType?: 'application/json' | 'text/plain';
+  stream?: boolean;
+}) => {
+  const res = await fetch('/api/generate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (payload.stream) {
+    // Streaming path is handled separately in the flows that need it.
+    return res;
+  }
+
+  const json = (await res.json()) as GenerateApiResponse;
+  if (!('text' in json)) throw new Error(json.error || 'Generate API error');
+  return json.text;
+};
+
+const fetchMarketHtmlViaProxy = async (targetUrl: string) => {
+  const res = await fetch(`/api/market-scout?url=${encodeURIComponent(targetUrl)}`, {
+    method: 'GET',
+    headers: { 'accept': 'text/html' },
+  });
+  if (!res.ok) throw new Error(`market-scout proxy error (${res.status})`);
+  return await res.text();
+};
+
+const parseIndeedJobs = (html: string): Job[] => {
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const anchors = Array.from(doc.querySelectorAll('a')).filter(a => (a.getAttribute('href') || '').includes('/viewjob'));
+    const uniq = new Map<string, Job>();
+    let id = 1;
+    for (const a of anchors.slice(0, 25)) {
+      const title = (a.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!title || title.length < 4) continue;
+      const key = title.toLowerCase();
+      if (uniq.has(key)) continue;
+      uniq.set(key, {
+        id: id++,
+        title,
+        company: '(Parsed via Market Proxy)',
+        requirements: 'See listing (parsed HTML proxy)'
+      });
+      if (uniq.size >= 3) break;
+    }
+    return Array.from(uniq.values());
+  } catch {
+    return [];
+  }
+};
+
 // --- Live Application Logic ---
 
 const App = () => {
-  const [activeTab, setActiveTab] = useState<'live' | 'architecture'>('live');
   const [workflow, setWorkflow] = useState<WorkflowMode>('expertise');
+
+  const [resourceConfig, setResourceConfig] = useState<ResourceConfig | null>(null);
+  const embeddingsClientRef = useRef<EmbeddingsClient | null>(null);
   
   // State
   const [userInput, setUserInput] = useState("Senior Frontend Engineer. 5 years exp. React, Node.js. Certified AWS Developer.");
   const [logs, setLogs] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [resumeOutput, setResumeOutput] = useState("");
+
+  // Minimal user metadata (SRS FR-4.1)
+  const [userName, setUserName] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [userPhone, setUserPhone] = useState("");
+
+  const [verification, setVerification] = useState<VerificationState>({ status: 'idle' });
+  const [manualCorrection, setManualCorrection] = useState("");
+  const [overrideDisclaimer, setOverrideDisclaimer] = useState(DEFAULT_DISCLAIMER);
   
   // Market Flow State
   const [marketIndustry, setMarketIndustry] = useState("Tech / Software");
@@ -119,6 +181,9 @@ const App = () => {
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [missingSkills, setMissingSkills] = useState<string[]>([]);
   const [gapResponse, setGapResponse] = useState("");
+
+  const marketCacheRef = useRef<Record<string, { jobs: Job[]; cachedAtIso: string }>>({});
+  const sessionTimeoutRef = useRef<number | null>(null);
   
   const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatus>>({
     ingestion: "idle",
@@ -135,27 +200,208 @@ const App = () => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
 
+  useEffect(() => {
+    // Browser-first bootstrap: SW (Cache API) + ResourceAgent selection
+    registerServiceWorker();
+    (async () => {
+      try {
+        const cfg = await initResourceAgent();
+        setResourceConfig(cfg);
+        addLog(`SYS: ResourceAgent > path=${cfg.path} (${cfg.reason}), score=${cfg.capability.score.toFixed(0)}.`);
+
+        if (cfg.path === 'local') {
+          // Start embeddings worker early (keeps UI responsive)
+          const client = createEmbeddingsWorkerClient(
+            new URL('./workers/embeddings.worker.ts', import.meta.url)
+          );
+          embeddingsClientRef.current = client;
+          addLog('SYS: Vector Engine > Web Worker initialized (Transformers.js).');
+        }
+      } catch (e) {
+        addLog(`WARN: ResourceAgent init failed; falling back to cloud. (${e})`);
+        setResourceConfig({
+          path: 'cloud',
+          reason: 'init-error',
+          embeddings: { mode: 'api' },
+          inference: { mode: 'api', apiUrl: '/api/generate' },
+          marketScout: { mode: 'proxy', apiUrl: '/api/market-scout' },
+          capability: { webgpuAvailable: false, deviceHighSpec: false, score: 0, network: {} },
+        });
+      }
+    })();
+
+    return () => {
+      embeddingsClientRef.current?.dispose();
+      embeddingsClientRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const addLog = (msg: string) => {
     const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     setLogs(prev => [...prev, `[${timestamp}] ${msg}`]);
   };
 
-  const getAI = () => {
-      if (!process.env.API_KEY) {
-          addLog("ERROR: No API Key found.");
-          return null;
+  const purgeSession = (reason: string) => {
+    setUserInput("");
+    setResumeOutput("");
+    setLogs(prev => [...prev, `[${new Date().toLocaleTimeString('en-US', { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}] SYS: Session purged (${reason}).`]);
+    setSelectedJob(null);
+    setAvailableJobs([]);
+    setMissingSkills([]);
+    setGapResponse("");
+    setAgentStatus({ ingestion: "idle", verifier: "idle", scout: "idle", analyst: "idle", synthesizer: "idle" });
+    setVerification({ status: 'idle' });
+    setManualCorrection("");
+    // Clear the file input handle (prevents accidental re-read)
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  useEffect(() => {
+    // Ephemeral session behavior (SRS FR-1.6)
+    const onBeforeUnload = () => {
+      try {
+        purgeSession('tab-close');
+      } catch {
+        // ignore
       }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+
+    sessionTimeoutRef.current = window.setTimeout(() => {
+      purgeSession('timeout');
+    }, SESSION_TIMEOUT_MS);
+
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      if (sessionTimeoutRef.current) window.clearTimeout(sessionTimeoutRef.current);
+    };
+  }, []);
+
+  const getAI = () => {
+      // Legacy path: keep Gemini client-side only for local dev / prototype.
+      // Production path uses /api/generate (serverless/edge) to avoid exposing API keys.
+      if (!process.env.API_KEY) return null;
       return new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
+
+  const llmText = async (prompt: string, responseMimeType?: 'application/json' | 'text/plain') => {
+    // Prefer serverless proxy when available. If it fails (e.g., local dev without Netlify), fall back to client-side Gemini.
+    try {
+      const text = await callGenerateApi({ prompt, responseMimeType });
+      if (typeof text === 'string') return text;
+      throw new Error('Unexpected generate API response');
+    } catch {
+      const ai = getAI();
+      if (!ai) throw new Error('No API available (missing API key and /api/generate unreachable)');
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: responseMimeType ? { responseMimeType } : undefined,
+      });
+      return response.text;
+    }
+  };
+
+  const llmStreamText = async (systemInstruction: string, message: string, onChunk: (t: string) => void) => {
+    // Streaming requirement: attempt SSE via /api/generate; fallback to Gemini stream.
+    try {
+      const res = (await callGenerateApi({
+        prompt: `${systemInstruction}\n\n${message}`,
+        stream: true,
+      })) as Response;
+
+      if (!res.ok || !res.body) throw new Error('Streaming unavailable');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Gemini SSE emits "data: {json}\n\n"; extract partial text if present.
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        for (const evt of events) {
+          const line = evt.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          const jsonStr = line.slice('data: '.length).trim();
+          if (!jsonStr || jsonStr === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const t = parsed?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text ?? '').join('') ?? '';
+            if (t) onChunk(t);
+          } catch {
+            // ignore parse errors
+          }
+        }
+      }
+      return;
+    } catch {
+      const ai = getAI();
+      if (!ai) throw new Error('No streaming API available');
+      const chat = ai.chats.create({
+        model: 'gemini-2.5-flash',
+        config: { systemInstruction },
+      });
+      const stream = await chat.sendMessageStream({ message });
+      for await (const chunk of stream) onChunk(chunk.text);
+    }
+  };
+
+  const embedSmart = async (text: string) => {
+    // Local-first: use worker embeddings if initialized; else fall back to deterministic prototype embed.
+    const client = embeddingsClientRef.current;
+    if (resourceConfig?.path === 'local' && client) {
+      return await client.embed(text);
+    }
+    return embedText(text);
+  };
+
+  const verifyCredentialsNow = async (profileText: string) => {
+    const summaryHash = simpleHash(profileText);
+    setVerification({ status: 'working' });
+    setAgentStatus(prev => ({ ...prev, verifier: 'working' }));
+    addLog('AGNT: Verifier > Validating credentials (immediate)...');
+
+    try {
+      const text = await llmText(
+        `You are a credential verifier.
+Given ONLY the following candidate profile text, determine whether certification claims are plausibly verifiable.
+
+Return STRICT JSON with keys:
+- status: "verified" | "failed"
+- confidence: number from 0 to 1
+- reason: short string
+
+Profile text:\n${profileText}`,
+        'application/json'
+      );
+
+      const parsed = JSON.parse(text) as { status: 'verified' | 'failed'; confidence: number; reason: string };
+      if (parsed.status === 'verified') {
+        setVerification({ status: 'verified', confidence: parsed.confidence ?? 1, summaryHash });
+        setAgentStatus(prev => ({ ...prev, verifier: 'success' }));
+        addLog(`AGNT: Verifier > Verified (confidence ${(parsed.confidence ?? 1).toFixed(2)}).`);
+      } else {
+        setVerification({ status: 'failed', reason: parsed.reason || 'Verification failed', summaryHash });
+        setAgentStatus(prev => ({ ...prev, verifier: 'error' }));
+        addLog(`AGNT: Verifier > FAILED: ${parsed.reason || 'Verification failed'}`);
+      }
+    } catch (e) {
+      setVerification({ status: 'failed', reason: 'Verifier error', summaryHash });
+      setAgentStatus(prev => ({ ...prev, verifier: 'error' }));
+      addLog(`ERR: Verifier failed > ${e}`);
+    }
+  };
 
   // --- Actions ---
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
-
-      const ai = getAI();
-      if (!ai) return;
 
       setAgentStatus(prev => ({...prev, ingestion: 'working'}));
       addLog(`AGNT: Ingestion > Reading ${file.name}...`);
@@ -165,20 +411,38 @@ const App = () => {
       reader.onloadend = async () => {
           const base64Data = (reader.result as string).split(',')[1];
           try {
-              const model = ai.models.generateContent; // correct method access is via instance
-              // Correct usage according to instructions
-              const response = await ai.models.generateContent({
+              let nextText: string;
+
+              try {
+                nextText = await callGenerateApi({
+                  parts: [
+                    { inlineData: { mimeType: file.type, data: base64Data } },
+                    { text: "OCR and Summarize: Extract the candidate's core skills, years of experience, and certifications from this document. Return a plain text summary." }
+                  ],
+                  responseMimeType: 'text/plain'
+                }) as unknown as string;
+              } catch {
+                // Final fallback: client-side Gemini if explicitly enabled (dev only).
+                const ai = getAI();
+                if (!ai) throw new Error('OCR requires /api/generate or a client API key (GEMINI_API_KEY + EXPOSE_CLIENT_GEMINI_KEY=true)');
+                const response = await ai.models.generateContent({
                   model: 'gemini-2.5-flash',
                   contents: {
-                      parts: [
-                          { inlineData: { mimeType: file.type, data: base64Data } },
-                          { text: "OCR and Summarize: Extract the candidate's core skills, years of experience, and certifications from this document. Return a plain text summary." }
-                      ]
+                    parts: [
+                      { inlineData: { mimeType: file.type, data: base64Data } },
+                      { text: "OCR and Summarize: Extract the candidate's core skills, years of experience, and certifications from this document. Return a plain text summary." }
+                    ]
                   }
-              });
-              setUserInput(response.text);
+                });
+                nextText = response.text;
+              }
+
+                setUserInput(nextText);
               addLog("AGNT: Ingestion > OCR Complete. Profile updated.");
               setAgentStatus(prev => ({...prev, ingestion: 'success'}));
+
+                // SRS FR-1.2: verify immediately upon upload
+                await verifyCredentialsNow(nextText);
           } catch (error) {
               addLog(`ERR: Ingestion failed > ${error}`);
               setAgentStatus(prev => ({...prev, ingestion: 'error'}));
@@ -190,54 +454,58 @@ const App = () => {
   };
 
   const runExpertiseFlow = async () => {
-    const ai = getAI();
-    if (!ai) return;
-    
     setIsProcessing(true);
     setLogs([]);
     setResumeOutput("");
-    setAgentStatus({ ingestion: "success", verifier: "working", scout: "idle", analyst: "idle", synthesizer: "idle" });
+    setAgentStatus({ ingestion: agentStatus.ingestion === 'success' ? 'success' : 'idle', verifier: "working", scout: "idle", analyst: "idle", synthesizer: "idle" });
     
     try {
-      // 1. Verifier
-      addLog("AGNT: Verifier > Validating credentials...");
-      const verifierRes = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `Verify this profile snippet for plausibility: "${userInput}". Return one sentence starting "Verified:".`,
-      });
-      addLog(`AGNT: Verifier > ${verifierRes.text}`);
+      // 1. Verifier gate (SRS FR-1.2)
+      const mustVerify = verification.status === 'idle' || verification.status === 'working';
+      if (mustVerify) {
+        await verifyCredentialsNow(userInput);
+      }
+
+      // Block unless verified or overridden
+      if (verification.status === 'failed') {
+        addLog('SYS: Resume synthesis halted until you correct or override verification.');
+        setAgentStatus(prev => ({ ...prev, verifier: 'error' }));
+        return;
+      }
+
+      addLog('AGNT: Verifier > Gate passed.');
       setAgentStatus(prev => ({ ...prev, verifier: "success", scout: "working" }));
 
       // 2. Market Scout
       addLog("AGNT: Scout > Identifying global trends...");
-      const scoutRes = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `Find 3 trending skills for a role described as: "${userInput}". List them.`,
-        config: { tools: [{ googleSearch: {} }] }
-      });
-      const trends = scoutRes.text;
+      const trends = await llmText(`Find 3 trending skills for a role described as: "${userInput}". List them.`);
       addLog(`AGNT: Scout > Trends: ${trends}`);
       setAgentStatus(prev => ({ ...prev, scout: "success", analyst: "working" }));
 
       // 3. Vector Analyst
       addLog("AGNT: Analyst > Computing Vector Embeddings...");
-      await new Promise(r => setTimeout(r, 800));
-      const score = (85 + Math.random() * 10).toFixed(1);
+      const userVec = await embedSmart(userInput);
+      const trendVec = await embedSmart(trends);
+      const score = (cosineSim(userVec as any, trendVec as any) * 100).toFixed(1);
       addLog(`AGNT: Analyst > Match Score: ${score}%`);
       setAgentStatus(prev => ({ ...prev, analyst: "success", synthesizer: "working" }));
 
       // 4. Synthesizer
       addLog("AGNT: Synthesizer > Stream generating...");
-      const chat = ai.chats.create({
-        model: 'gemini-2.5-flash',
-        config: { systemInstruction: "Write a high-impact resume summary (max 150 words) incorporating the user profile and these market trends." }
-      });
-      const stream = await chat.sendMessageStream({ message: `Profile: ${userInput}\nTrends: ${trends}` });
-      
       let fullText = "";
-      for await (const chunk of stream) {
-        fullText += chunk.text;
-        setResumeOutput(fullText);
+
+      await llmStreamText(
+        "Write a high-impact resume summary (max 150 words) incorporating the user profile and these market trends.",
+        `Profile: ${userInput}\nTrends: ${trends}`,
+        (t) => {
+          fullText += t;
+          setResumeOutput(fullText);
+        }
+      );
+
+      // If verification was overridden, prepend disclaimer
+      if (verification.status === 'overridden') {
+        setResumeOutput(`${verification.disclaimer}\n\n${fullText}`);
       }
       setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
 
@@ -249,9 +517,6 @@ const App = () => {
   };
 
   const scanMarket = async () => {
-    const ai = getAI();
-    if (!ai) return;
-
     setIsProcessing(true);
     setAvailableJobs([]);
     setSelectedJob(null);
@@ -261,43 +526,70 @@ const App = () => {
     addLog(`AGNT: Scout > Scanning live market for "${marketIndustry}"...`);
     
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: `Find 3 currently active or realistic high-demand job listings for the industry: "${marketIndustry}". 
-            Return strictly a JSON array with objects containing: "id" (number), "title", "company", "requirements" (short string).`,
-             config: { responseMimeType: "application/json" }
-        });
-        
-        const jobs = JSON.parse(response.text);
+        // Browser-first market proxy: fetch raw HTML via /api/market-scout and parse client-side.
+        // Note: real job boards may block automated fetches; fall back to LLM/cached/fallback list.
+        try {
+          const q = encodeURIComponent(marketIndustry);
+          const html = await fetchMarketHtmlViaProxy(`https://www.indeed.com/jobs?q=${q}`);
+          const parsedJobs = parseIndeedJobs(html);
+          if (parsedJobs.length) {
+            setAvailableJobs(parsedJobs);
+            marketCacheRef.current[marketIndustry] = { jobs: parsedJobs, cachedAtIso: new Date().toISOString() };
+            addLog(`AGNT: Scout > Parsed ${parsedJobs.length} jobs via Market Proxy.`);
+            setAgentStatus(prev => ({ ...prev, scout: "success" }));
+            return;
+          }
+        } catch {
+          // ignore and fall back
+        }
+
+        const text = await llmText(
+          `Find 3 currently active or realistic high-demand job listings for the industry: "${marketIndustry}".
+Return strictly a JSON array with objects containing: "id" (number), "title", "company", "requirements" (short string).`,
+          'application/json'
+        );
+
+        const jobs = JSON.parse(text);
         setAvailableJobs(jobs);
+        marketCacheRef.current[marketIndustry] = { jobs, cachedAtIso: new Date().toISOString() };
         addLog(`AGNT: Scout > Found ${jobs.length} open positions.`);
         setAgentStatus(prev => ({ ...prev, scout: "success" }));
     } catch (e) {
-        addLog(`ERR: Scout failed > ${e}`);
-        setAgentStatus(prev => ({ ...prev, scout: "error" }));
+        const cached = marketCacheRef.current[marketIndustry];
+        if (cached?.jobs?.length) {
+          setAvailableJobs(cached.jobs);
+          addLog(`WARN: Scout failed; using cached top jobs (cachedAt=${cached.cachedAtIso}).`);
+          setAgentStatus(prev => ({ ...prev, scout: "success" }));
+        } else {
+          // Minimal built-in fallback dataset (SRS NFR 5.3)
+          const fallback: Job[] = [
+            { id: 1, title: "Software Engineer", company: "(Fallback)" , requirements: "React/TypeScript, APIs, testing, CI/CD" },
+            { id: 2, title: "Data Analyst", company: "(Fallback)" , requirements: "SQL, dashboards, Python, statistics" },
+            { id: 3, title: "Cloud Engineer", company: "(Fallback)" , requirements: "AWS/GCP, IaC, networking, observability" },
+          ];
+          setAvailableJobs(fallback);
+          addLog(`WARN: Scout failed; using built-in fallback jobs.`);
+          setAgentStatus(prev => ({ ...prev, scout: "success" }));
+        }
     } finally {
         setIsProcessing(false);
     }
   };
 
   const analyzeGap = async (job: Job) => {
-    const ai = getAI();
-    if (!ai) return;
-
     setSelectedJob(job);
     setAgentStatus(prev => ({ ...prev, analyst: "working" }));
     addLog(`AGNT: Analyst > Gap Analysis for ${job.title}...`);
 
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: `Compare User Profile: "${userInput}" 
-            vs Job Requirements: "${job.requirements}".
-            Identify up to 3 missing key skills or qualifications.
-            Return a JSON array of strings (the missing skills). If none, return empty array.`,
-            config: { responseMimeType: "application/json" }
-        });
-        const gaps = JSON.parse(response.text);
+        const text = await llmText(
+          `Compare User Profile: "${userInput}" 
+vs Job Requirements: "${job.requirements}".
+Identify up to 3 missing key skills or qualifications.
+Return a JSON array of strings (the missing skills). If none, return empty array.`,
+          'application/json'
+        );
+        const gaps = JSON.parse(text);
         setMissingSkills(gaps);
         if (gaps.length > 0) {
              addLog(`AGNT: Analyst > Detected ${gaps.length} skill gaps.`);
@@ -311,33 +603,29 @@ const App = () => {
   };
 
   const synthesizeMarketResume = async () => {
-      const ai = getAI();
-      if (!ai || !selectedJob) return;
+      if (!selectedJob) return;
 
       setIsProcessing(true);
       setAgentStatus(prev => ({ ...prev, synthesizer: "working" }));
       addLog("AGNT: Synthesizer > Bridging gaps and generating tailored resume...");
 
       try {
-          const chat = ai.chats.create({
-              model: 'gemini-2.5-flash',
-              config: { systemInstruction: "You are an expert Resume Strategist. Create a tailored resume summary that positions the candidate for the specific job, incorporating their new gap-fill explanation seamlessly." }
-          });
-          
-          const stream = await chat.sendMessageStream({ 
-              message: `Target Job: ${selectedJob.title} at ${selectedJob.company}
-              Requirements: ${selectedJob.requirements}
-              Candidate Profile: ${userInput}
-              Gap Explanation (Dynamic Interview): ${gapResponse}
-              
-              Generate the resume summary now.` 
-          });
-
           let fullText = "";
-          for await (const chunk of stream) {
-              fullText += chunk.text;
-              setResumeOutput(fullText);
+
+          await llmStreamText(
+          "You are an expert Resume Strategist. Create a tailored resume summary that positions the candidate for the specific job, incorporating their new gap-fill explanation seamlessly.",
+          `Target Job: ${selectedJob.title} at ${selectedJob.company}
+    Requirements: ${selectedJob.requirements}
+    Candidate Profile: ${userInput}
+    Gap Explanation (Dynamic Interview): ${gapResponse}
+
+    Generate the resume summary now.`,
+          (t) => {
+            fullText += t;
+            setResumeOutput(fullText);
           }
+          );
+
           setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
       } catch (e) {
           addLog(`ERR: Synthesis failed > ${e}`);
@@ -371,36 +659,45 @@ const App = () => {
             <h1 className="font-bold text-xl tracking-tight">ARS-MME <span className="text-slate-500 font-normal text-sm ml-2 hidden sm:inline">| Agentic Resume Engine</span></h1>
           </div>
           <div className="flex bg-slate-800 rounded-lg p-1">
-            <button onClick={() => setActiveTab('live')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${activeTab === 'live' ? 'bg-cyan-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}>Live Engine</button>
-            <button onClick={() => setActiveTab('architecture')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${activeTab === 'architecture' ? 'bg-cyan-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}>System Architecture</button>
+            <button onClick={() => setWorkflow('expertise')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${workflow === 'expertise' ? 'bg-cyan-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}>Expertise Mode</button>
+            <button onClick={() => setWorkflow('market')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${workflow === 'market' ? 'bg-purple-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}>Market Mode</button>
           </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 py-8">
         
-        {activeTab === 'live' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
             
             {/* LEFT COLUMN: Controls */}
             <div className="lg:col-span-4 space-y-6">
               <div className="bg-slate-900 rounded-xl border border-slate-800 p-6 shadow-2xl">
-                
-                {/* Workflow Selector */}
-                <div className="grid grid-cols-2 gap-3 mb-6">
-                  <div 
-                    onClick={() => setWorkflow('expertise')}
-                    className={`border p-3 rounded-lg cursor-pointer transition-colors ${workflow === 'expertise' ? 'border-cyan-500 bg-cyan-950/30' : 'border-slate-700 bg-slate-900/50 opacity-60 hover:opacity-100'}`}
-                  >
-                    <div className="text-cyan-400 font-bold text-sm mb-1">Expertise Centric</div>
-                    <div className="text-[10px] text-slate-400">Upload → Verify → Match</div>
-                  </div>
-                  <div 
-                    onClick={() => setWorkflow('market')}
-                    className={`border p-3 rounded-lg cursor-pointer transition-colors ${workflow === 'market' ? 'border-purple-500 bg-purple-950/30' : 'border-slate-700 bg-slate-900/50 opacity-60 hover:opacity-100'}`}
-                  >
-                    <div className="text-purple-400 font-bold text-sm mb-1">Market Centric</div>
-                    <div className="text-[10px] text-slate-400">Demand → Gap → Interview</div>
+
+                {/* User Metadata (SRS FR-4.1) */}
+                <div className="mb-6">
+                  <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">User Metadata (Ephemeral)</div>
+                  <div className="grid grid-cols-1 gap-2">
+                    <input
+                      value={userName}
+                      onChange={(e) => setUserName(e.target.value)}
+                      placeholder="Name"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white"
+                    />
+                    <input
+                      value={userEmail}
+                      onChange={(e) => setUserEmail(e.target.value)}
+                      placeholder="Email"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white"
+                    />
+                    <input
+                      value={userPhone}
+                      onChange={(e) => setUserPhone(e.target.value)}
+                      placeholder="Phone"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white"
+                    />
+                    <div className="text-[10px] text-slate-500 font-mono">
+                      Stored: name/email/phone + verification hash only (session memory).
+                    </div>
                   </div>
                 </div>
 
@@ -428,6 +725,56 @@ const App = () => {
                       className="w-full h-40 bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm text-slate-300 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors resize-none font-mono"
                       placeholder="Paste resume content or upload file..."
                     />
+
+                    {/* Verification Failure UI (SRS FR-1.2) */}
+                    {verification.status === 'failed' && (
+                      <div className="mt-4 p-3 bg-red-950/30 border border-red-900/50 rounded-lg animate-in fade-in slide-in-from-bottom-2">
+                        <div className="flex items-center gap-2 text-red-400 text-xs font-bold mb-2">
+                          <Icons.Alert /> VERIFICATION FAILED
+                        </div>
+                        <div className="text-xs text-slate-300 mb-2">Reason: <span className="text-white font-mono">{verification.reason}</span></div>
+                        <textarea
+                          value={manualCorrection}
+                          onChange={(e) => setManualCorrection(e.target.value)}
+                          placeholder="Option A: Correct certification details here (issuer, ID, dates, links)..."
+                          className="w-full h-20 bg-slate-950 border border-red-900/50 rounded p-2 text-xs text-white focus:border-red-500"
+                        />
+                        <textarea
+                          value={overrideDisclaimer}
+                          onChange={(e) => setOverrideDisclaimer(e.target.value)}
+                          placeholder="Option B: Provide a disclaimer for override..."
+                          className="w-full h-16 mt-2 bg-slate-950 border border-red-900/50 rounded p-2 text-xs text-white focus:border-red-500"
+                        />
+                        <div className="flex gap-2 mt-2">
+                          <button
+                            onClick={() => {
+                              const corrected = manualCorrection.trim();
+                              if (!corrected) {
+                                addLog('SYS: Add corrections first (or override).');
+                                return;
+                              }
+                              const updated = `${userInput}\n\nCorrections/Proofs: ${corrected}`;
+                              setUserInput(updated);
+                              void verifyCredentialsNow(updated);
+                            }}
+                            className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded"
+                          >
+                            Re-Verify With Corrections
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (verification.status !== 'failed') return;
+                              setVerification({ status: 'overridden', reason: verification.reason, disclaimer: overrideDisclaimer, summaryHash: verification.summaryHash });
+                              setAgentStatus(prev => ({ ...prev, verifier: 'success' }));
+                              addLog('SYS: Verification overridden; disclaimer will be included.');
+                            }}
+                            className="flex-1 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded"
+                          >
+                            Override With Disclaimer
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     
                     <button 
                       onClick={runExpertiseFlow}
@@ -569,41 +916,6 @@ const App = () => {
 
             </div>
           </div>
-        )}
-
-        {activeTab === 'architecture' && (
-          <div className="grid grid-cols-1 gap-8 animate-in fade-in duration-500">
-             <div className="bg-gradient-to-r from-cyan-900/20 to-slate-900 border border-cyan-500/20 rounded-xl p-6 mb-4">
-              <h2 className="text-2xl font-bold text-white mb-2">Deep Think: Architectural Specifications</h2>
-              <p className="text-slate-400 max-w-2xl">
-                Generated strictly adhering to the "Privacy-by-Design" and "Latency-Aware" constraints.
-              </p>
-            </div>
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                {ARCHITECTURE_DOCS.map((doc) => (
-                    <div key={doc.id} className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden shadow-xl hover:border-slate-700 transition-colors">
-                        <div className="bg-slate-950 px-6 py-4 border-b border-slate-800 flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <div className="text-cyan-400 bg-cyan-950/30 p-2 rounded-lg">{doc.icon}</div>
-                                <h3 className="font-semibold text-slate-200">{doc.title}</h3>
-                            </div>
-                            {doc.language && <span className="text-xs font-mono bg-slate-800 px-2 py-1 rounded text-slate-400">{doc.language}</span>}
-                        </div>
-                        <div className="p-0 overflow-x-auto">
-                            {doc.language ? (
-                                <pre className="p-6 text-sm font-mono text-blue-200 bg-[#0d1117] overflow-x-auto"><code>{doc.content}</code></pre>
-                            ) : (
-                                <div className="p-6 prose prose-invert prose-sm max-w-none text-slate-300">
-                                    <div dangerouslySetInnerHTML={{ __html: doc.content.replace(/\n/g, '<br/>').replace(/\*\*(.*?)\*\*/g, '<strong class="text-white">$1</strong>') }} />
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                ))}
-            </div>
-          </div>
-        )}
-
       </main>
     </div>
   );
