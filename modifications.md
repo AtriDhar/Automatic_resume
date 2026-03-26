@@ -55,7 +55,7 @@ This document details the architectural changes made to implement a robust hybri
 | `Dockerfile` | Multi-stage optimized build for 512MB RAM constraint |
 | `requirements.txt` | Lightweight dependencies (no heavy ML libraries) |
 | `main.py` | FastAPI app with health + scrape endpoints |
-| `types.py` | Pydantic models for Vector-Ready Protocol |
+| `schemas.py` | Pydantic models for Vector-Ready Protocol |
 | `.env.example` | Environment variable template |
 | `README.md` | Backend service documentation |
 

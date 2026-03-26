@@ -108,10 +108,11 @@ GET /api/mock-market-scan?keywords=software+engineer&limit=3
 ## Local Development
 
 ```bash
+# Create virtual environment (run from PARENT directory to avoid
+# Python built-in module shadowing by backend/schemas.py)
+cd ..
+python -m venv backend/venv
 cd backend
-
-# Create virtual environment
-python -m venv venv
 source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 
 # Install dependencies

@@ -8,7 +8,7 @@
 
 import { getApiUrl } from './useBackendWakeup';
 
-// --- Types (matching backend types.py) ---
+// --- Types (matching backend schemas.py) ---
 
 export interface JobChunk {
   /** Unique chunk identifier (job_id + chunk_index) */
