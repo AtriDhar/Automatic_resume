@@ -104,6 +104,34 @@ const asErrorMessage = (err: unknown) => {
   }
 };
 
+const decodeBase64Utf8 = (base64: string) => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+};
+
+const bestEffortLocalExtract = (mimeType: string, fileName: string, base64Data: string) => {
+  const lowerMime = (mimeType || '').toLowerCase();
+  const lowerName = (fileName || '').toLowerCase();
+
+  if (lowerMime.startsWith('text/') || lowerName.endsWith('.txt') || lowerName.endsWith('.md')) {
+    const text = decodeBase64Utf8(base64Data).trim();
+    return text;
+  }
+
+  if (lowerMime.includes('pdf') || lowerName.endsWith('.pdf')) {
+    // Best-effort parser for text-based PDFs (won't handle image-only scans).
+    const raw = atob(base64Data);
+    const literalStrings = Array.from(raw.matchAll(/\(([^\)]{3,})\)/g)).map((m) => m[1]);
+    const asciiRuns = Array.from(raw.matchAll(/[A-Za-z0-9][A-Za-z0-9\s,\.\-:\/]{30,}/g)).map((m) => m[0]);
+    const merged = [...literalStrings, ...asciiRuns].join('\n').replace(/\\[nrt]/g, ' ').replace(/\s+/g, ' ').trim();
+    return merged;
+  }
+
+  return '';
+};
+
 const getResumeOutputIssue = (text: string) => {
   const trimmed = text.trim();
   if (!trimmed) return 'empty-output';
@@ -159,8 +187,15 @@ const callGenerateApi = async (payload: {
     return res;
   }
 
-  const json = (await res.json()) as GenerateApiResponse;
-  if (!('text' in json)) throw new Error(json.error || 'Generate API error');
+  const json = (await res.json()) as GenerateApiResponse & { upstreamStatus?: number; traceId?: string; detail?: string };
+  if (!('text' in json)) {
+    throw new Error(
+      (json.error || 'Generate API error') +
+      (json.upstreamStatus ? ` upstreamStatus=${json.upstreamStatus}` : '') +
+      (json.traceId ? ` traceId=${json.traceId}` : '') +
+      (json.detail ? ` detail=${json.detail}` : ''),
+    );
+  }
   return json.text;
 };
 
@@ -596,6 +631,7 @@ Profile text:\n${profileText}`,
           const base64Data = (reader.result as string).split(',')[1];
           try {
               let nextText: string;
+              let serverOcrError = '';
 
               try {
                 nextText = await callGenerateApi({
@@ -605,20 +641,34 @@ Profile text:\n${profileText}`,
                   ],
                   responseMimeType: 'text/plain'
                 }) as unknown as string;
-              } catch {
+              } catch (e) {
+                serverOcrError = asErrorMessage(e);
+                addLog(`WARN: Ingestion > Server OCR failed, trying fallback. ${serverOcrError}`);
+
+                const localExtracted = bestEffortLocalExtract(file.type, file.name, base64Data);
+                if (localExtracted && localExtracted.length >= 40) {
+                  nextText = localExtracted;
+                  addLog('AGNT: Ingestion > Local extraction fallback used.');
+                } else {
                 // Final fallback: client-side Gemini if explicitly enabled (dev only).
                 const ai = getAI();
-                if (!ai) throw new Error('OCR requires /api/generate or a client API key (GEMINI_API_KEY + EXPOSE_CLIENT_GEMINI_KEY=true)');
-                const response = await ai.models.generateContent({
-                  model: 'gemini-2.5-flash',
-                  contents: {
-                    parts: [
-                      { inlineData: { mimeType: file.type, data: base64Data } },
-                      { text: "OCR and Summarize: Extract the candidate's core skills, years of experience, and certifications from this document. Return a plain text summary." }
-                    ]
+                  if (!ai) {
+                    throw new Error(
+                      `OCR unavailable: /api/generate failed (${serverOcrError || 'unknown'}) and client API key is not enabled ` +
+                      '(set GEMINI_API_KEY on deployment for server OCR).',
+                    );
                   }
-                });
-                nextText = response.text;
+                  const response = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    contents: {
+                      parts: [
+                        { inlineData: { mimeType: file.type, data: base64Data } },
+                        { text: "OCR and Summarize: Extract the candidate's core skills, years of experience, and certifications from this document. Return a plain text summary." }
+                      ]
+                    }
+                  });
+                  nextText = response.text;
+                }
               }
 
                 setUserInput(nextText);
