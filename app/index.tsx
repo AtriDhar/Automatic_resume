@@ -111,9 +111,12 @@ const callGenerateApi = async (payload: {
   responseMimeType?: 'application/json' | 'text/plain';
   stream?: boolean;
 }) => {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (payload.stream) headers.accept = 'text/event-stream';
+
   const res = await fetch('/api/generate', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
   });
 
@@ -376,6 +379,41 @@ const App = () => {
     let lastParseError = '';
     let lastEventPreview = '';
 
+    const consumeEvent = (evtRaw: string) => {
+      const evt = evtRaw.trim();
+      if (!evt) return;
+
+      eventsSeen += 1;
+      lastEventPreview = evt.slice(0, 240);
+
+      // Prefer SSE data-line payloads, but also support raw JSON payloads.
+      const dataLine = evt.split('\n').find((l) => l.startsWith('data: '));
+      const payload = (dataLine ? dataLine.slice('data: '.length) : evt).trim();
+      if (!payload || payload === '[DONE]') return;
+
+      try {
+        const parsed = JSON.parse(payload);
+        eventsParsed += 1;
+
+        if (parsed?.error) {
+          throw new Error(`upstream-payload-error: ${JSON.stringify(parsed.error)}`);
+        }
+
+        const t =
+          parsed?.candidates?.[0]?.content?.parts
+            ?.map((p: any) => p?.text ?? '')
+            .join('') ?? '';
+
+        if (t) {
+          chunksEmitted += 1;
+          onChunk(t);
+        }
+      } catch (e) {
+        parseErrorCount += 1;
+        lastParseError = asErrorMessage(e);
+      }
+    };
+
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -384,29 +422,11 @@ const App = () => {
       const events = buffer.split('\n\n');
       buffer = events.pop() || '';
 
-      for (const evt of events) {
-        eventsSeen += 1;
-        lastEventPreview = evt.slice(0, 240);
-        const line = evt.split('\n').find(l => l.startsWith('data: '));
-        if (!line) continue;
-
-        const jsonStr = line.slice('data: '.length).trim();
-        if (!jsonStr || jsonStr === '[DONE]') continue;
-
-        try {
-          const parsed = JSON.parse(jsonStr);
-          eventsParsed += 1;
-          const t = parsed?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text ?? '').join('') ?? '';
-          if (t) {
-            chunksEmitted += 1;
-            onChunk(t);
-          }
-        } catch (e) {
-          parseErrorCount += 1;
-          lastParseError = asErrorMessage(e);
-        }
-      }
+      for (const evt of events) consumeEvent(evt);
     }
+
+    // Flush any final payload even if the upstream omitted trailing SSE delimiter.
+    if (buffer.trim()) consumeEvent(buffer);
 
     if (chunksEmitted === 0) {
       const diag = {
