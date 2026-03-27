@@ -190,6 +190,7 @@ const App = () => {
   const [logs, setLogs] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [resumeOutput, setResumeOutput] = useState("");
+  const [generationError, setGenerationError] = useState("");
 
   // Minimal user metadata (SRS FR-4.1)
   const [userName, setUserName] = useState("");
@@ -482,6 +483,7 @@ Profile text:\n${profileText}`,
     setIsProcessing(true);
     setLogs([]);
     setResumeOutput("");
+    setGenerationError("");
     setAgentStatus({ ingestion: agentStatus.ingestion === 'success' ? 'success' : 'idle', verifier: "working", scout: "idle", analyst: "idle", synthesizer: "idle" });
     
     try {
@@ -494,6 +496,7 @@ Profile text:\n${profileText}`,
       // Block unless verified or overridden
       if (verification.status === 'failed') {
         addLog('SYS: Resume synthesis halted until you correct or override verification.');
+        setGenerationError('Verification failed. Please correct details or override with disclaimer before synthesis.');
         setAgentStatus(prev => ({ ...prev, verifier: 'error' }));
         return;
       }
@@ -528,14 +531,23 @@ Profile text:\n${profileText}`,
         }
       );
 
+      if (!fullText.trim()) {
+        throw new Error('Empty synthesis response received from API stream.');
+      }
+
       // If verification was overridden, prepend disclaimer
       if (verification.status === 'overridden') {
         setResumeOutput(`${verification.disclaimer}\n\n${fullText}`);
+      } else {
+        setResumeOutput(fullText);
       }
+      setGenerationError("");
       setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
 
     } catch (e) {
       addLog(`ERR: ${e}`);
+      setGenerationError(`Synthesis failed: ${String(e)}. Please retry.`);
+      setAgentStatus(prev => ({ ...prev, synthesizer: "error" }));
     } finally {
       setIsProcessing(false);
     }
@@ -546,6 +558,7 @@ Profile text:\n${profileText}`,
     setAvailableJobs([]);
     setSelectedJob(null);
     setResumeOutput("");
+    setGenerationError("");
     setAgentStatus({ ingestion: "idle", verifier: "idle", scout: "working", analyst: "idle", synthesizer: "idle" });
 
     addLog(`AGNT: Scout > Scanning live market for "${marketIndustry}"...`);
@@ -617,6 +630,7 @@ Return strictly a JSON array with objects containing: "id" (number), "title", "c
 
   const analyzeGap = async (job: Job) => {
     setSelectedJob(job);
+    setGenerationError("");
     setAgentStatus(prev => ({ ...prev, analyst: "working" }));
     addLog(`AGNT: Analyst > Gap Analysis for ${job.title}...`);
 
@@ -644,7 +658,16 @@ Return a JSON array of strings (the missing skills). If none, return empty array
   const synthesizeMarketResume = async () => {
       if (!selectedJob) return;
 
+      if (missingSkills.length > 0 && !gapResponse.trim()) {
+        const msg = 'Please provide gap-fill details before generating this resume.';
+        addLog(`SYS: ${msg}`);
+        setGenerationError(msg);
+        setAgentStatus(prev => ({ ...prev, synthesizer: "error" }));
+        return;
+      }
+
       setIsProcessing(true);
+      setGenerationError("");
       setAgentStatus(prev => ({ ...prev, synthesizer: "working" }));
       addLog("AGNT: Synthesizer > Bridging gaps and generating tailored resume...");
 
@@ -665,9 +688,16 @@ Return a JSON array of strings (the missing skills). If none, return empty array
           }
           );
 
+          if (!fullText.trim()) {
+            throw new Error('Empty synthesis response received from API stream.');
+          }
+
+          setGenerationError("");
           setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
       } catch (e) {
           addLog(`ERR: Synthesis failed > ${e}`);
+          setGenerationError(`Synthesis failed: ${String(e)}. Please retry.`);
+          setAgentStatus(prev => ({ ...prev, synthesizer: "error" }));
       } finally {
           setIsProcessing(false);
       }
@@ -940,6 +970,12 @@ Return a JSON array of strings (the missing skills). If none, return empty array
                         </button>
                     )}
                 </div>
+
+                {generationError && (
+                  <div className="mb-4 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {generationError}
+                  </div>
+                )}
 
                 {!resumeOutput ? (
                   <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-4 opacity-50">
