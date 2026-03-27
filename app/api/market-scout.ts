@@ -7,6 +7,8 @@ const ALLOWED_HOST_SUFFIXES = [
   'linkedin.com',
   'glassdoor.com',
   'stackoverflow.com',
+  'remotive.com',
+  'arbeitnow.com',
 ];
 
 const json = (body: unknown, status = 200) =>
@@ -50,7 +52,7 @@ export default async function handler(request: Request) {
   return new Response(upstream.body, {
     status: upstream.status,
     headers: {
-      'content-type': 'text/html; charset=utf-8',
+      'content-type': upstream.headers.get('content-type') || 'text/plain; charset=utf-8',
       'cache-control': 'no-store',
     },
   });

@@ -167,10 +167,46 @@ const callGenerateApi = async (payload: {
 const fetchMarketHtmlViaProxy = async (targetUrl: string) => {
   const res = await fetch(`/api/market-scout?url=${encodeURIComponent(targetUrl)}`, {
     method: 'GET',
-    headers: { 'accept': 'text/html' },
+    headers: { 'accept': '*/*' },
   });
   if (!res.ok) throw new Error(`market-scout proxy error (${res.status})`);
   return await res.text();
+};
+
+const fetchRemotiveJobs = async (industry: string): Promise<Job[]> => {
+  const target = `https://remotive.com/api/remote-jobs?search=${encodeURIComponent(industry)}`;
+  const raw = await fetchMarketHtmlViaProxy(target);
+  const data = JSON.parse(raw) as {
+    jobs?: Array<{ title?: string; company_name?: string; tags?: string[]; candidate_required_location?: string }>;
+  };
+  const rows = Array.isArray(data?.jobs) ? data.jobs : [];
+  return rows.slice(0, 3).map((j, i) => ({
+    id: i + 1,
+    title: (j.title || `Role ${i + 1}`).trim(),
+    company: (j.company_name || '(Remotive)').trim(),
+    requirements: [
+      Array.isArray(j.tags) ? j.tags.slice(0, 4).join(', ') : '',
+      j.candidate_required_location || '',
+    ].filter(Boolean).join(' | ') || 'See listing details',
+  }));
+};
+
+const fetchArbeitnowJobs = async (industry: string): Promise<Job[]> => {
+  const target = `https://www.arbeitnow.com/api/job-board-api?search=${encodeURIComponent(industry)}`;
+  const raw = await fetchMarketHtmlViaProxy(target);
+  const data = JSON.parse(raw) as {
+    data?: Array<{ title?: string; company_name?: string; tags?: string[]; location?: string }>;
+  };
+  const rows = Array.isArray(data?.data) ? data.data : [];
+  return rows.slice(0, 3).map((j, i) => ({
+    id: i + 1,
+    title: (j.title || `Role ${i + 1}`).trim(),
+    company: (j.company_name || '(Arbeitnow)').trim(),
+    requirements: [
+      Array.isArray(j.tags) ? j.tags.slice(0, 4).join(', ') : '',
+      j.location || '',
+    ].filter(Boolean).join(' | ') || 'See listing details',
+  }));
 };
 
 const fetchBackendMarketScan = async (industry: string): Promise<Job[]> => {
@@ -256,6 +292,7 @@ const App = () => {
 
   const marketCacheRef = useRef<Record<string, { jobs: Job[]; cachedAtIso: string }>>({});
   const sessionTimeoutRef = useRef<number | null>(null);
+  const isProcessingRef = useRef(false);
   
   const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatus>>({
     ingestion: "idle",
@@ -329,6 +366,23 @@ const App = () => {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
+  const resetSessionTimeout = () => {
+    if (sessionTimeoutRef.current) window.clearTimeout(sessionTimeoutRef.current);
+    sessionTimeoutRef.current = window.setTimeout(() => {
+      // Do not purge while a workflow is running; defer timeout instead.
+      if (isProcessingRef.current) {
+        addLog('SYS: Session timeout deferred while processing.');
+        resetSessionTimeout();
+        return;
+      }
+      purgeSession('timeout');
+    }, SESSION_TIMEOUT_MS);
+  };
+
+  useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
+
   useEffect(() => {
     // Ephemeral session behavior (SRS FR-1.6)
     const onBeforeUnload = () => {
@@ -340,12 +394,22 @@ const App = () => {
     };
     window.addEventListener('beforeunload', onBeforeUnload);
 
-    sessionTimeoutRef.current = window.setTimeout(() => {
-      purgeSession('timeout');
-    }, SESSION_TIMEOUT_MS);
+    const onActivity = () => resetSessionTimeout();
+    window.addEventListener('click', onActivity);
+    window.addEventListener('keydown', onActivity);
+    window.addEventListener('pointerdown', onActivity);
+    window.addEventListener('touchstart', onActivity);
+    window.addEventListener('scroll', onActivity, { passive: true });
+
+    resetSessionTimeout();
 
     return () => {
       window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('click', onActivity);
+      window.removeEventListener('keydown', onActivity);
+      window.removeEventListener('pointerdown', onActivity);
+      window.removeEventListener('touchstart', onActivity);
+      window.removeEventListener('scroll', onActivity);
       if (sessionTimeoutRef.current) window.clearTimeout(sessionTimeoutRef.current);
     };
   }, []);
@@ -509,6 +573,8 @@ Profile text:\n${profileText}`,
       const file = e.target.files?.[0];
       if (!file) return;
 
+      resetSessionTimeout();
+
       setAgentStatus(prev => ({...prev, ingestion: 'working'}));
       addLog(`AGNT: Ingestion > Reading ${file.name}...`);
       setIsProcessing(true);
@@ -604,6 +670,7 @@ Output requirements:
   };
 
   const runExpertiseFlow = async () => {
+    resetSessionTimeout();
     setIsProcessing(true);
     setLogs([]);
     setResumeOutput("");
@@ -675,6 +742,7 @@ Output requirements:
   };
 
   const scanMarket = async () => {
+    resetSessionTimeout();
     setIsProcessing(true);
     setAvailableJobs([]);
     setSelectedJob(null);
@@ -685,8 +753,34 @@ Output requirements:
     addLog(`AGNT: Scout > Scanning live market for "${marketIndustry}"...`);
     
     try {
-        // Browser-first market proxy: fetch raw HTML via /api/market-scout and parse client-side.
-        // Note: real job boards may block automated fetches; fall back to LLM/cached/fallback list.
+        // Prefer public live job APIs first to reduce fallback usage.
+        try {
+          const remotiveJobs = await fetchRemotiveJobs(marketIndustry);
+          if (remotiveJobs.length) {
+            setAvailableJobs(remotiveJobs);
+            marketCacheRef.current[marketIndustry] = { jobs: remotiveJobs, cachedAtIso: new Date().toISOString() };
+            addLog(`AGNT: Scout > Loaded ${remotiveJobs.length} live jobs via Remotive API.`);
+            setAgentStatus(prev => ({ ...prev, scout: "success" }));
+            return;
+          }
+        } catch {
+          // ignore and continue
+        }
+
+        try {
+          const arbeitnowJobs = await fetchArbeitnowJobs(marketIndustry);
+          if (arbeitnowJobs.length) {
+            setAvailableJobs(arbeitnowJobs);
+            marketCacheRef.current[marketIndustry] = { jobs: arbeitnowJobs, cachedAtIso: new Date().toISOString() };
+            addLog(`AGNT: Scout > Loaded ${arbeitnowJobs.length} live jobs via Arbeitnow API.`);
+            setAgentStatus(prev => ({ ...prev, scout: "success" }));
+            return;
+          }
+        } catch {
+          // ignore and continue
+        }
+
+        // HTML job-board parsing fallback.
         try {
           const q = encodeURIComponent(marketIndustry);
           const html = await fetchMarketHtmlViaProxy(`https://www.indeed.com/jobs?q=${q}`);
