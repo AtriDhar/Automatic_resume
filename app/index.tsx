@@ -104,6 +104,15 @@ const asErrorMessage = (err: unknown) => {
   }
 };
 
+const isReadableExtract = (text: string) => {
+  const t = (text || '').trim();
+  if (!t) return false;
+  const chars = t.length;
+  if (chars < 80) return false;
+  const printable = (t.match(/[A-Za-z0-9\s,.;:()\-/'"&]/g) || []).length;
+  return printable / chars >= 0.75;
+};
+
 const decodeBase64Utf8 = (base64: string) => {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
@@ -155,12 +164,8 @@ const bestEffortLocalExtract = async (mimeType: string, fileName: string, base64
   if (lowerMime.includes('pdf') || lowerName.endsWith('.pdf')) {
     // Robust parser for text PDFs via pdfjs. Image-only scans may still require server OCR.
     const parsed = await extractPdfTextWithPdfJs(base64Data);
-    if (parsed) return parsed;
-
-    // Last-resort fallback for malformed PDFs.
-    const raw = atob(base64Data);
-    const literalStrings = Array.from(raw.matchAll(/\(([^\)]{3,})\)/g)).map((m) => m[1]);
-    return literalStrings.join(' ').replace(/\\[nrt]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (isReadableExtract(parsed)) return parsed;
+    return '';
   }
 
   return '';
@@ -642,17 +647,9 @@ Profile text:\n${profileText}`,
         addLog(`AGNT: Verifier > FAILED: ${parsed.reason || 'Verification failed'}`);
       }
     } catch (e) {
-      // Graceful offline fallback: do not hard-block synthesis when API is temporarily unavailable.
-      const tokenCount = normalizeTokens(profileText).length;
-      if (tokenCount >= 20) {
-        setVerification({ status: 'verified', confidence: 0.51, summaryHash });
-        setAgentStatus(prev => ({ ...prev, verifier: 'success' }));
-        addLog(`WARN: Verifier API unavailable; using heuristic pass (confidence 0.51). ${asErrorMessage(e)}`);
-      } else {
-        setVerification({ status: 'failed', reason: 'Verifier error', summaryHash });
-        setAgentStatus(prev => ({ ...prev, verifier: 'error' }));
-        addLog(`ERR: Verifier failed > ${asErrorMessage(e)}`);
-      }
+      setVerification({ status: 'failed', reason: `Verifier unavailable: ${asErrorMessage(e)}`, summaryHash });
+      setAgentStatus(prev => ({ ...prev, verifier: 'error' }));
+      addLog(`ERR: Verifier failed > ${asErrorMessage(e)}`);
     }
   };
 
@@ -696,8 +693,8 @@ Profile text:\n${profileText}`,
                 const ai = getAI();
                   if (!ai) {
                     throw new Error(
-                      `OCR unavailable: /api/generate failed (${serverOcrError || 'unknown'}) and client API key is not enabled ` +
-                      '(set GEMINI_API_KEY on deployment for server OCR).',
+                      `OCR unavailable: /api/generate failed (${serverOcrError || 'unknown'}) and local PDF extraction could not recover readable text. ` +
+                      'Please use a text-based PDF or restore server API access (set GEMINI_API_KEY).',
                     );
                   }
                   const response = await ai.models.generateContent({
@@ -770,7 +767,26 @@ Output requirements:
       addLog(`SYS: Synthesizer quality retry ${attempt}/${maxAttempts} triggered by ${issue}.`);
     }
 
-    throw new Error(`Invalid synthesis output after ${maxAttempts} attempts: ${lastIssue || 'unknown-issue'}`);
+    // Escalation: strict non-stream generation often returns more complete text when stream chunks are too short.
+    const strictPrompt = `${systemInstruction}
+
+${baseMessage}
+
+STRICT OUTPUT RULES:
+- Return only a polished resume summary paragraph.
+- 110 to 150 words.
+- Include role fit, 3 concrete achievements/strengths, and domain keywords.
+- No bullets, no heading, no preface.
+- End with one concise impact sentence.`;
+    const fallbackText = await llmText(strictPrompt, 'text/plain');
+    const fallbackIssue = getResumeOutputIssue(fallbackText);
+    if (!fallbackIssue) {
+      setResumeOutput(fallbackText);
+      addLog('SYS: Synthesizer fallback succeeded via strict non-stream generation.');
+      return fallbackText;
+    }
+
+    throw new Error(`Invalid synthesis output after ${maxAttempts} attempts: ${fallbackIssue || lastIssue || 'unknown-issue'}`);
   };
 
   const runExpertiseFlow = async () => {
@@ -801,7 +817,18 @@ Output requirements:
 
       // 2. Market Scout
       addLog("AGNT: Scout > Identifying global trends...");
-      const trends = await llmText(`Find 3 trending skills for a role described as: "${userInput}". List them.`);
+      const trendsRaw = await llmText(
+        `For this profile: "${userInput}", return EXACTLY a JSON array of 3 short skill phrases only. Example: ["Skill A", "Skill B", "Skill C"].`,
+        'application/json',
+      );
+      let trends = '';
+      try {
+        const arr = JSON.parse(trendsRaw);
+        const list = Array.isArray(arr) ? arr.slice(0, 3).map((x) => String(x || '').trim()).filter(Boolean) : [];
+        trends = list.join(', ');
+      } catch {
+        trends = trendsRaw;
+      }
       addLog(`AGNT: Scout > Trends: ${trends}`);
       setAgentStatus(prev => ({ ...prev, scout: "success", analyst: "working" }));
 
