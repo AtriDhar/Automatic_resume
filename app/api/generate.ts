@@ -19,6 +19,8 @@ const json = (body: unknown, status = 200) =>
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   });
 
+const makeTraceId = () => `gen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
 export default async function handler(request: Request) {
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
@@ -38,6 +40,7 @@ export default async function handler(request: Request) {
 
   const prompt = String(body.prompt || '');
   const model = body.model || 'gemini-2.5-flash';
+  const traceId = makeTraceId();
   const responseMimeType = body.responseMimeType || 'text/plain';
   const wantStream =
     !!body.stream || request.headers.get('accept')?.includes('text/event-stream');
@@ -53,9 +56,24 @@ export default async function handler(request: Request) {
       body: JSON.stringify({ contents: [{ role: 'user', parts }] }),
     });
 
+    if (!upstream.ok) {
+      const detail = await upstream.text();
+      return json(
+        {
+          error: 'Upstream stream error',
+          upstreamStatus: upstream.status,
+          detail,
+          model,
+          traceId,
+        },
+        upstream.status,
+      );
+    }
+
     const headers = new Headers(upstream.headers);
     headers.set('content-type', 'text/event-stream');
     headers.set('cache-control', 'no-cache');
+    headers.set('x-trace-id', traceId);
 
     return new Response(upstream.body, { status: upstream.status, headers });
   }
@@ -72,7 +90,7 @@ export default async function handler(request: Request) {
 
   if (!upstream.ok) {
     const detail = await upstream.text();
-    return json({ error: 'Upstream error', detail }, 502);
+    return json({ error: 'Upstream error', detail, upstreamStatus: upstream.status, model, traceId }, upstream.status);
   }
 
   const data = await upstream.json();

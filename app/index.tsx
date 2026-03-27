@@ -95,6 +95,15 @@ const registerServiceWorker = async () => {
 
 type GenerateApiResponse = { text: string } | { error: string; detail?: string };
 
+const asErrorMessage = (err: unknown) => {
+  if (err instanceof Error) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+};
+
 const callGenerateApi = async (payload: {
   prompt?: string;
   parts?: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>;
@@ -109,7 +118,26 @@ const callGenerateApi = async (payload: {
   });
 
   if (payload.stream) {
-    // Streaming path is handled separately in the flows that need it.
+    if (!res.ok) {
+      const traceId = res.headers.get('x-trace-id') || '';
+      let detail = '';
+      let upstreamStatus = '';
+      try {
+        const parsed = await res.json() as { detail?: string; upstreamStatus?: number; error?: string; traceId?: string };
+        detail = parsed.detail || parsed.error || '';
+        if (typeof parsed.upstreamStatus === 'number') upstreamStatus = String(parsed.upstreamStatus);
+        if (!traceId && parsed.traceId) detail = `${detail} | traceId=${parsed.traceId}`;
+      } catch {
+        detail = await res.text();
+      }
+      throw new Error(
+        `stream-http-error status=${res.status}` +
+          (upstreamStatus ? ` upstreamStatus=${upstreamStatus}` : '') +
+          (traceId ? ` traceId=${traceId}` : '') +
+          (detail ? ` detail=${detail}` : ''),
+      );
+    }
+    // Streaming path is handled separately in flows that need incremental tokens.
     return res;
   }
 
@@ -330,50 +358,67 @@ const App = () => {
   };
 
   const llmStreamText = async (systemInstruction: string, message: string, onChunk: (t: string) => void) => {
-    // Streaming requirement: attempt SSE via /api/generate; fallback to Gemini stream.
-    try {
-      const res = (await callGenerateApi({
-        prompt: `${systemInstruction}\n\n${message}`,
-        stream: true,
-      })) as Response;
+    // Traceback-first mode: strict server stream, no client-model fallback.
+    const res = (await callGenerateApi({
+      prompt: `${systemInstruction}\n\n${message}`,
+      stream: true,
+    })) as Response;
 
-      if (!res.ok || !res.body) throw new Error('Streaming unavailable');
+    if (!res.body) throw new Error('stream-body-missing');
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let eventsSeen = 0;
+    let eventsParsed = 0;
+    let chunksEmitted = 0;
+    let parseErrorCount = 0;
+    let lastParseError = '';
+    let lastEventPreview = '';
 
-        // Gemini SSE emits "data: {json}\n\n"; extract partial text if present.
-        const events = buffer.split('\n\n');
-        buffer = events.pop() || '';
-        for (const evt of events) {
-          const line = evt.split('\n').find(l => l.startsWith('data: '));
-          if (!line) continue;
-          const jsonStr = line.slice('data: '.length).trim();
-          if (!jsonStr || jsonStr === '[DONE]') continue;
-          try {
-            const parsed = JSON.parse(jsonStr);
-            const t = parsed?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text ?? '').join('') ?? '';
-            if (t) onChunk(t);
-          } catch {
-            // ignore parse errors
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const events = buffer.split('\n\n');
+      buffer = events.pop() || '';
+
+      for (const evt of events) {
+        eventsSeen += 1;
+        lastEventPreview = evt.slice(0, 240);
+        const line = evt.split('\n').find(l => l.startsWith('data: '));
+        if (!line) continue;
+
+        const jsonStr = line.slice('data: '.length).trim();
+        if (!jsonStr || jsonStr === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(jsonStr);
+          eventsParsed += 1;
+          const t = parsed?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text ?? '').join('') ?? '';
+          if (t) {
+            chunksEmitted += 1;
+            onChunk(t);
           }
+        } catch (e) {
+          parseErrorCount += 1;
+          lastParseError = asErrorMessage(e);
         }
       }
-      return;
-    } catch {
-      const ai = getAI();
-      if (!ai) throw new Error('No streaming API available');
-      const chat = ai.chats.create({
-        model: 'gemini-2.5-flash',
-        config: { systemInstruction },
-      });
-      const stream = await chat.sendMessageStream({ message });
-      for await (const chunk of stream) onChunk(chunk.text);
+    }
+
+    if (chunksEmitted === 0) {
+      const diag = {
+        error: 'empty-stream-output',
+        eventsSeen,
+        eventsParsed,
+        chunksEmitted,
+        parseErrorCount,
+        lastParseError,
+        lastEventPreview,
+      };
+      throw new Error(JSON.stringify(diag));
     }
   };
 
@@ -545,8 +590,8 @@ Profile text:\n${profileText}`,
       setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
 
     } catch (e) {
-      addLog(`ERR: ${e}`);
-      setGenerationError(`Synthesis failed: ${String(e)}. Please retry.`);
+      addLog(`ERR: ${asErrorMessage(e)}`);
+      setGenerationError(`Synthesis failed: ${asErrorMessage(e)}`);
       setAgentStatus(prev => ({ ...prev, synthesizer: "error" }));
     } finally {
       setIsProcessing(false);
@@ -695,8 +740,8 @@ Return a JSON array of strings (the missing skills). If none, return empty array
           setGenerationError("");
           setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
       } catch (e) {
-          addLog(`ERR: Synthesis failed > ${e}`);
-          setGenerationError(`Synthesis failed: ${String(e)}. Please retry.`);
+          addLog(`ERR: Synthesis failed > ${asErrorMessage(e)}`);
+          setGenerationError(`Synthesis failed: ${asErrorMessage(e)}`);
           setAgentStatus(prev => ({ ...prev, synthesizer: "error" }));
       } finally {
           setIsProcessing(false);
