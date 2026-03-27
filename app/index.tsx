@@ -104,6 +104,21 @@ const asErrorMessage = (err: unknown) => {
   }
 };
 
+const getResumeOutputIssue = (text: string) => {
+  const trimmed = text.trim();
+  if (!trimmed) return 'empty-output';
+
+  const lower = trimmed.toLowerCase();
+  if (lower === "here's a tailored resume summary" || lower === 'here is a tailored resume summary') {
+    return 'placeholder-output';
+  }
+
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  if (wordCount < 30) return `too-short(${wordCount}-words)`;
+
+  return '';
+};
+
 const callGenerateApi = async (payload: {
   prompt?: string;
   parts?: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>;
@@ -588,7 +603,7 @@ Profile text:\n${profileText}`,
       let fullText = "";
 
       await llmStreamText(
-        "Write a high-impact resume summary (max 150 words) incorporating the user profile and these market trends.",
+        "Write a high-impact resume summary (max 150 words) incorporating the user profile and these market trends. Output plain text only with no preface like 'Here is the summary'.",
         `Profile: ${userInput}\nTrends: ${trends}`,
         (t) => {
           fullText += t;
@@ -596,8 +611,9 @@ Profile text:\n${profileText}`,
         }
       );
 
-      if (!fullText.trim()) {
-        throw new Error('Empty synthesis response received from API stream.');
+      const outputIssue = getResumeOutputIssue(fullText);
+      if (outputIssue) {
+        throw new Error(`Invalid synthesis output: ${outputIssue}`);
       }
 
       // If verification was overridden, prepend disclaimer
@@ -611,6 +627,7 @@ Profile text:\n${profileText}`,
 
     } catch (e) {
       addLog(`ERR: ${asErrorMessage(e)}`);
+      setResumeOutput("");
       setGenerationError(`Synthesis failed: ${asErrorMessage(e)}`);
       setAgentStatus(prev => ({ ...prev, synthesizer: "error" }));
     } finally {
@@ -732,6 +749,7 @@ Return a JSON array of strings (the missing skills). If none, return empty array
       }
 
       setIsProcessing(true);
+      setResumeOutput("");
       setGenerationError("");
       setAgentStatus(prev => ({ ...prev, synthesizer: "working" }));
       addLog("AGNT: Synthesizer > Bridging gaps and generating tailored resume...");
@@ -740,7 +758,7 @@ Return a JSON array of strings (the missing skills). If none, return empty array
           let fullText = "";
 
           await llmStreamText(
-          "You are an expert Resume Strategist. Create a tailored resume summary that positions the candidate for the specific job, incorporating their new gap-fill explanation seamlessly.",
+              "You are an expert Resume Strategist. Create a tailored resume summary that positions the candidate for the specific job, incorporating their new gap-fill explanation seamlessly. Output only the final summary text with no heading or preface.",
           `Target Job: ${selectedJob.title} at ${selectedJob.company}
     Requirements: ${selectedJob.requirements}
     Candidate Profile: ${userInput}
@@ -753,14 +771,16 @@ Return a JSON array of strings (the missing skills). If none, return empty array
           }
           );
 
-          if (!fullText.trim()) {
-            throw new Error('Empty synthesis response received from API stream.');
+          const outputIssue = getResumeOutputIssue(fullText);
+          if (outputIssue) {
+            throw new Error(`Invalid synthesis output: ${outputIssue}`);
           }
 
           setGenerationError("");
           setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
       } catch (e) {
           addLog(`ERR: Synthesis failed > ${asErrorMessage(e)}`);
+          setResumeOutput("");
           setGenerationError(`Synthesis failed: ${asErrorMessage(e)}`);
           setAgentStatus(prev => ({ ...prev, synthesizer: "error" }));
       } finally {
