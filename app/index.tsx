@@ -525,7 +525,19 @@ const App = () => {
     // Local-first: use worker embeddings if initialized; else fall back to deterministic prototype embed.
     const client = embeddingsClientRef.current;
     if (resourceConfig?.path === 'local' && client) {
-      return await client.embed(text);
+      try {
+        const timeoutMs = 12000;
+        const timed = await Promise.race([
+          client.embed(text),
+          new Promise<Float32Array>((_, reject) =>
+            window.setTimeout(() => reject(new Error(`embedding-timeout-${timeoutMs}ms`)), timeoutMs),
+          ),
+        ]);
+        return timed;
+      } catch (e) {
+        addLog(`WARN: Vector Engine fallback > ${asErrorMessage(e)}`);
+        return embedText(text);
+      }
     }
     return embedText(text);
   };
