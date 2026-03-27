@@ -127,6 +127,31 @@ const fetchMarketHtmlViaProxy = async (targetUrl: string) => {
   return await res.text();
 };
 
+const fetchBackendMarketScan = async (industry: string): Promise<Job[]> => {
+  const backendBase = ((import.meta as any)?.env?.VITE_BACKEND_URL || '').trim();
+  if (!backendBase) return [];
+
+  const url = `${backendBase.replace(/\/$/, '')}/api/mock-market-scan?keywords=${encodeURIComponent(industry)}&limit=3`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { accept: 'application/json' },
+  });
+
+  if (!res.ok) throw new Error(`backend market scan error (${res.status})`);
+
+  const json = await res.json() as {
+    results?: Array<{ title?: string; company?: string; chunks?: Array<{ text?: string }> }>;
+  };
+
+  const rows = Array.isArray(json?.results) ? json.results : [];
+  return rows.slice(0, 3).map((r, i) => ({
+    id: i + 1,
+    title: r.title || `Role ${i + 1}`,
+    company: r.company || '(Backend)',
+    requirements: r.chunks?.[0]?.text || 'See listing details',
+  }));
+};
+
 const parseIndeedJobs = (html: string): Job[] => {
   try {
     const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -541,6 +566,20 @@ Profile text:\n${profileText}`,
           }
         } catch {
           // ignore and fall back
+        }
+
+        // Backend-assisted fallback before LLM fallback.
+        try {
+          const backendJobs = await fetchBackendMarketScan(marketIndustry);
+          if (backendJobs.length) {
+            setAvailableJobs(backendJobs);
+            marketCacheRef.current[marketIndustry] = { jobs: backendJobs, cachedAtIso: new Date().toISOString() };
+            addLog(`AGNT: Scout > Loaded ${backendJobs.length} jobs via backend fallback.`);
+            setAgentStatus(prev => ({ ...prev, scout: "success" }));
+            return;
+          }
+        } catch {
+          // ignore and continue
         }
 
         const text = await llmText(
