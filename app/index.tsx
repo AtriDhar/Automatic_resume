@@ -559,6 +559,50 @@ Profile text:\n${profileText}`,
       reader.readAsDataURL(file);
   };
 
+  const streamResumeWithQualityRetry = async (
+    systemInstruction: string,
+    baseMessage: string,
+    maxAttempts = 3,
+  ) => {
+    let lastIssue = '';
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let fullText = '';
+      setResumeOutput('');
+
+      const retryRules =
+        attempt === 1
+          ? ''
+          : `
+
+RETRY ${attempt}/${maxAttempts}:
+Previous output was invalid (${lastIssue}).
+Output requirements:
+- 90 to 140 words.
+- Plain text only.
+- No preface like "Here is your summary".
+- Include at least 3 concrete role-relevant achievements.
+- End with a clear closing value proposition sentence.`;
+
+      await llmStreamText(
+        systemInstruction,
+        `${baseMessage}${retryRules}`,
+        (t) => {
+          fullText += t;
+          setResumeOutput(fullText);
+        },
+      );
+
+      const issue = getResumeOutputIssue(fullText);
+      if (!issue) return fullText;
+
+      lastIssue = issue;
+      addLog(`SYS: Synthesizer quality retry ${attempt}/${maxAttempts} triggered by ${issue}.`);
+    }
+
+    throw new Error(`Invalid synthesis output after ${maxAttempts} attempts: ${lastIssue || 'unknown-issue'}`);
+  };
+
   const runExpertiseFlow = async () => {
     setIsProcessing(true);
     setLogs([]);
@@ -600,15 +644,10 @@ Profile text:\n${profileText}`,
 
       // 4. Synthesizer
       addLog("AGNT: Synthesizer > Stream generating...");
-      let fullText = "";
-
-      await llmStreamText(
+      const fullText = await streamResumeWithQualityRetry(
         "Write a high-impact resume summary (max 150 words) incorporating the user profile and these market trends. Output plain text only with no preface like 'Here is the summary'.",
         `Profile: ${userInput}\nTrends: ${trends}`,
-        (t) => {
-          fullText += t;
-          setResumeOutput(fullText);
-        }
+        3,
       );
 
       const outputIssue = getResumeOutputIssue(fullText);
@@ -755,9 +794,7 @@ Return a JSON array of strings (the missing skills). If none, return empty array
       addLog("AGNT: Synthesizer > Bridging gaps and generating tailored resume...");
 
       try {
-          let fullText = "";
-
-          await llmStreamText(
+          const fullText = await streamResumeWithQualityRetry(
               "You are an expert Resume Strategist. Create a tailored resume summary that positions the candidate for the specific job, incorporating their new gap-fill explanation seamlessly. Output only the final summary text with no heading or preface.",
           `Target Job: ${selectedJob.title} at ${selectedJob.company}
     Requirements: ${selectedJob.requirements}
@@ -765,10 +802,7 @@ Return a JSON array of strings (the missing skills). If none, return empty array
     Gap Explanation (Dynamic Interview): ${gapResponse}
 
     Generate the resume summary now.`,
-          (t) => {
-            fullText += t;
-            setResumeOutput(fullText);
-          }
+          3,
           );
 
           const outputIssue = getResumeOutputIssue(fullText);
