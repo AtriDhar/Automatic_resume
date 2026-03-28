@@ -38,6 +38,7 @@ type VerificationState =
 
 const SESSION_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_DISCLAIMER = "Disclaimer: Automatic credential verification was inconclusive. Any certification claims should be treated as candidate-provided.";
+const MISSING_API_HINT = "Set LLM_PROVIDER=nvidia and NVIDIA_API_KEY (or GEMINI_API_KEY) on the server, then redeploy.";
 
 const normalizeTokens = (text: string) =>
   (text || "")
@@ -186,6 +187,24 @@ const getResumeOutputIssue = (text: string) => {
   return '';
 };
 
+const inferTrendsFromProfile = (profile: string) => {
+  const lower = (profile || '').toLowerCase();
+  const buckets: Array<{ keywords: string[]; trends: string }> = [
+    { keywords: ['data', 'sql', 'analytics', 'python'], trends: 'Data Analytics, SQL, BI' },
+    { keywords: ['cloud', 'aws', 'gcp', 'azure'], trends: 'Cloud Engineering, DevOps, IaC' },
+    { keywords: ['frontend', 'react', 'ui', 'typescript'], trends: 'Frontend Engineering, React, TypeScript' },
+    { keywords: ['backend', 'api', 'node', 'java'], trends: 'Backend Services, APIs, Distributed Systems' },
+    { keywords: ['ml', 'ai', 'model', 'pytorch'], trends: 'Machine Learning, Model Deployment, MLOps' },
+  ];
+
+  for (const bucket of buckets) {
+    const hits = bucket.keywords.filter((k) => lower.includes(k)).length;
+    if (hits >= 2) return bucket.trends;
+  }
+
+  return 'Tech / Software, Product Delivery, Cross-functional Collaboration';
+};
+
 const callGenerateApi = async (payload: {
   prompt?: string;
   parts?: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>;
@@ -207,13 +226,18 @@ const callGenerateApi = async (payload: {
       const traceId = res.headers.get('x-trace-id') || '';
       let detail = '';
       let upstreamStatus = '';
+      const resClone = res.clone();
       try {
         const parsed = await res.json() as { detail?: string; upstreamStatus?: number; error?: string; traceId?: string };
         detail = parsed.detail || parsed.error || '';
         if (typeof parsed.upstreamStatus === 'number') upstreamStatus = String(parsed.upstreamStatus);
         if (!traceId && parsed.traceId) detail = `${detail} | traceId=${parsed.traceId}`;
       } catch {
-        detail = await res.text();
+        try {
+          detail = await resClone.text();
+        } catch {
+          detail = '';
+        }
       }
       throw new Error(
         `stream-http-error status=${res.status}` +
@@ -503,7 +527,7 @@ const App = () => {
       throw new Error('Unexpected generate API response');
     } catch {
       const ai = getAI();
-      if (!ai) throw new Error('No API available (missing API key and /api/generate unreachable)');
+      if (!ai) throw new Error(`No API available (missing API key and /api/generate unreachable). ${MISSING_API_HINT}`);
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: prompt,
@@ -694,7 +718,7 @@ Profile text:\n${profileText}`,
                   if (!ai) {
                     throw new Error(
                       `OCR unavailable: /api/generate failed (${serverOcrError || 'unknown'}) and local PDF extraction could not recover readable text. ` +
-                      'Please use a text-based PDF or restore server API access (set GEMINI_API_KEY).',
+                      `Use a text-based PDF or restore server OCR by configuring the server env. ${MISSING_API_HINT}`,
                     );
                   }
                   const response = await ai.models.generateContent({
@@ -817,17 +841,22 @@ STRICT OUTPUT RULES:
 
       // 2. Market Scout
       addLog("AGNT: Scout > Identifying global trends...");
-      const trendsRaw = await llmText(
-        `For this profile: "${userInput}", return EXACTLY a JSON array of 3 short skill phrases only. Example: ["Skill A", "Skill B", "Skill C"].`,
-        'application/json',
-      );
       let trends = '';
       try {
-        const arr = JSON.parse(trendsRaw);
-        const list = Array.isArray(arr) ? arr.slice(0, 3).map((x) => String(x || '').trim()).filter(Boolean) : [];
-        trends = list.join(', ');
-      } catch {
-        trends = trendsRaw;
+        const trendsRaw = await llmText(
+          `For this profile: "${userInput}", return EXACTLY a JSON array of 3 short skill phrases only. Example: ["Skill A", "Skill B", "Skill C"].`,
+          'application/json',
+        );
+        try {
+          const arr = JSON.parse(trendsRaw);
+          const list = Array.isArray(arr) ? arr.slice(0, 3).map((x) => String(x || '').trim()).filter(Boolean) : [];
+          trends = list.join(', ');
+        } catch {
+          trends = trendsRaw;
+        }
+      } catch (scoutErr) {
+        trends = inferTrendsFromProfile(userInput);
+        addLog(`WARN: Scout > Trends generation fallback used. ${asErrorMessage(scoutErr)} ${MISSING_API_HINT}`);
       }
       addLog(`AGNT: Scout > Trends: ${trends}`);
       setAgentStatus(prev => ({ ...prev, scout: "success", analyst: "working" }));
