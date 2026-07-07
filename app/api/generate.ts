@@ -222,7 +222,8 @@ export default async function handler(request: Request) {
       body: JSON.stringify({
         model,
         messages: [{ role: 'user', content: userText }],
-        max_tokens: 512,
+        // Full structured resume documents need headroom; 512 truncated JSON mid-object.
+        max_tokens: 2048,
         temperature: 0.2,
         top_p: 0.7,
         frequency_penalty: 0,

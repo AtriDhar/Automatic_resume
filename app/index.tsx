@@ -4,6 +4,14 @@ import { GoogleGenAI } from "@google/genai";
 import { initResourceAgent, type ResourceConfig } from "./lib/resourceAgent";
 import { createEmbeddingsWorkerClient, type EmbeddingsClient } from "./lib/embeddings";
 import { useBackendWakeup } from "./lib/useBackendWakeup";
+import {
+  RESUME_JSON_INSTRUCTIONS,
+  parseResumeDocument,
+  renderResumeMarkdown,
+  buildAtsReport,
+  type ResumeDocument,
+  type AtsReport,
+} from "./lib/resumeDocument";
 
 // --- Icons (Inline SVGs) ---
 const Icons = {
@@ -169,21 +177,6 @@ const bestEffortLocalExtract = async (mimeType: string, fileName: string, base64
     if (isReadableExtract(parsed)) return parsed;
     return '';
   }
-
-  return '';
-};
-
-const getResumeOutputIssue = (text: string) => {
-  const trimmed = text.trim();
-  if (!trimmed) return 'empty-output';
-
-  const lower = trimmed.toLowerCase();
-  if (lower === "here's a tailored resume summary" || lower === 'here is a tailored resume summary') {
-    return 'placeholder-output';
-  }
-
-  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
-  if (wordCount < 30) return `too-short(${wordCount}-words)`;
 
   return '';
 };
@@ -374,6 +367,7 @@ const App = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [resumeOutput, setResumeOutput] = useState("");
   const [generationError, setGenerationError] = useState("");
+  const [atsReport, setAtsReport] = useState<AtsReport | null>(null);
 
   // Minimal user metadata (SRS FR-4.1)
   const [userName, setUserName] = useState("");
@@ -462,6 +456,7 @@ const App = () => {
     setUserName("");
     setUserEmail("");
     setUserPhone("");
+    setAtsReport(null);
     setLogs(prev => [...prev, `[${new Date().toLocaleTimeString('en-US', { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}] SYS: Session purged (${reason}).`]);
     setSelectedJob(null);
     setAvailableJobs([]);
@@ -557,88 +552,6 @@ const App = () => {
         config: responseMimeType ? { responseMimeType } : undefined,
       });
       return response.text;
-    }
-  };
-
-  const llmStreamText = async (systemInstruction: string, message: string, onChunk: (t: string) => void) => {
-    // Traceback-first mode: strict server stream, no client-model fallback.
-    const res = (await callGenerateApi({
-      prompt: `${systemInstruction}\n\n${message}`,
-      stream: true,
-    })) as Response;
-
-    if (!res.body) throw new Error('stream-body-missing');
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let eventsSeen = 0;
-    let eventsParsed = 0;
-    let chunksEmitted = 0;
-    let parseErrorCount = 0;
-    let lastParseError = '';
-    let lastEventPreview = '';
-
-    const consumeEvent = (evtRaw: string) => {
-      const evt = evtRaw.trim();
-      if (!evt) return;
-
-      eventsSeen += 1;
-      lastEventPreview = evt.slice(0, 240);
-
-      // Prefer SSE data-line payloads, but also support raw JSON payloads.
-      const dataLine = evt.split('\n').find((l) => l.startsWith('data: '));
-      const payload = (dataLine ? dataLine.slice('data: '.length) : evt).trim();
-      if (!payload || payload === '[DONE]') return;
-
-      try {
-        const parsed = JSON.parse(payload);
-        eventsParsed += 1;
-
-        if (parsed?.error) {
-          throw new Error(`upstream-payload-error: ${JSON.stringify(parsed.error)}`);
-        }
-
-        const t =
-          parsed?.candidates?.[0]?.content?.parts
-            ?.map((p: any) => p?.text ?? '')
-            .join('') ?? '';
-
-        if (t) {
-          chunksEmitted += 1;
-          onChunk(t);
-        }
-      } catch (e) {
-        parseErrorCount += 1;
-        lastParseError = asErrorMessage(e);
-      }
-    };
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const events = buffer.split('\n\n');
-      buffer = events.pop() || '';
-
-      for (const evt of events) consumeEvent(evt);
-    }
-
-    // Flush any final payload even if the upstream omitted trailing SSE delimiter.
-    if (buffer.trim()) consumeEvent(buffer);
-
-    if (chunksEmitted === 0) {
-      const diag = {
-        error: 'empty-stream-output',
-        eventsSeen,
-        eventsParsed,
-        chunksEmitted,
-        parseErrorCount,
-        lastParseError,
-        lastEventPreview,
-      };
-      throw new Error(JSON.stringify(diag));
     }
   };
 
@@ -778,67 +691,45 @@ Profile text:\n${profileText}`,
       reader.readAsDataURL(file);
   };
 
-  const streamResumeWithQualityRetry = async (
-    systemInstruction: string,
-    baseMessage: string,
+  /**
+   * Structured resume generation (FR-1.4/FR-2.4).
+   * Asks for strict JSON, validates the shape, retries with the specific
+   * defect fed back to the model, then renders Markdown with the user's
+   * contact metadata injected (FR-4.1 data finally used in the output).
+   */
+  const generateStructuredResume = async (
+    taskDescription: string,
+    context: string,
     maxAttempts = 3,
-  ) => {
+  ): Promise<ResumeDocument> => {
     let lastIssue = '';
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      let fullText = '';
       setResumeOutput('');
+      const retryNote = attempt === 1
+        ? ''
+        : `\n\nRETRY ${attempt}/${maxAttempts}: previous output was rejected (${lastIssue}). Fix that issue and return the full JSON again.`;
 
-      const retryRules =
-        attempt === 1
-          ? ''
-          : `
-
-RETRY ${attempt}/${maxAttempts}:
-Previous output was invalid (${lastIssue}).
-Output requirements:
-- 90 to 140 words.
-- Plain text only.
-- No preface like "Here is your summary".
-- Include at least 3 concrete role-relevant achievements.
-- End with a clear closing value proposition sentence.`;
-
-      await llmStreamText(
-        systemInstruction,
-        `${baseMessage}${retryRules}`,
-        (t) => {
-          fullText += t;
-          setResumeOutput(fullText);
-        },
+      const raw = await llmText(
+        `${taskDescription}\n\n${context}\n\n${RESUME_JSON_INSTRUCTIONS}${retryNote}`,
+        'application/json',
       );
 
-      const issue = getResumeOutputIssue(fullText);
-      if (!issue) return fullText;
+      const result = parseResumeDocument(raw);
+      if (typeof result !== 'string') return result;
 
-      lastIssue = issue;
-      addLog(`SYS: Synthesizer quality retry ${attempt}/${maxAttempts} triggered by ${issue}.`);
+      lastIssue = result;
+      addLog(`SYS: Synthesizer quality retry ${attempt}/${maxAttempts} triggered by ${result}.`);
     }
 
-    // Escalation: strict non-stream generation often returns more complete text when stream chunks are too short.
-    const strictPrompt = `${systemInstruction}
+    throw new Error(`Invalid resume document after ${maxAttempts} attempts: ${lastIssue}`);
+  };
 
-${baseMessage}
-
-STRICT OUTPUT RULES:
-- Return only a polished resume summary paragraph.
-- 110 to 150 words.
-- Include role fit, 3 concrete achievements/strengths, and domain keywords.
-- No bullets, no heading, no preface.
-- End with one concise impact sentence.`;
-    const fallbackText = await llmText(strictPrompt, 'text/plain');
-    const fallbackIssue = getResumeOutputIssue(fallbackText);
-    if (!fallbackIssue) {
-      setResumeOutput(fallbackText);
-      addLog('SYS: Synthesizer fallback succeeded via strict non-stream generation.');
-      return fallbackText;
-    }
-
-    throw new Error(`Invalid synthesis output after ${maxAttempts} attempts: ${fallbackIssue || lastIssue || 'unknown-issue'}`);
+  const renderAndSetResume = (doc: ResumeDocument) => {
+    const disclaimer = verification.status === 'overridden' ? verification.disclaimer : undefined;
+    const md = renderResumeMarkdown(doc, { name: userName, email: userEmail, phone: userPhone }, disclaimer);
+    setResumeOutput(md);
+    return md;
   };
 
   const runExpertiseFlow = async () => {
@@ -847,6 +738,7 @@ STRICT OUTPUT RULES:
     setLogs([]);
     setResumeOutput("");
     setGenerationError("");
+    setAtsReport(null);
     setAgentStatus({ ingestion: agentStatus.ingestion === 'success' ? 'success' : 'idle', verifier: "working", scout: "idle", analyst: "idle", synthesizer: "idle" });
     
     try {
@@ -892,33 +784,23 @@ STRICT OUTPUT RULES:
       addLog(`AGNT: Scout > Trends: ${trends}`);
       setAgentStatus(prev => ({ ...prev, scout: "success", analyst: "working" }));
 
-      // 3. Vector Analyst
+      // 3. Vector Analyst — semantic similarity + keyword-level ATS report
       addLog("AGNT: Analyst > Computing Vector Embeddings...");
       const userVec = await embedSmart(userInput);
       const trendVec = await embedSmart(trends);
-      const score = (cosineSim(userVec as any, trendVec as any) * 100).toFixed(1);
-      addLog(`AGNT: Analyst > Match Score: ${score}%`);
+      const similarity = cosineSim(userVec as any, trendVec as any);
+      const report = buildAtsReport(userInput, trends, similarity);
+      setAtsReport(report);
+      addLog(`AGNT: Analyst > ATS match ${report.matchScore}%. Missing keywords: ${report.missingKeywords.slice(0, 5).join(', ') || 'none'}.`);
       setAgentStatus(prev => ({ ...prev, analyst: "success", synthesizer: "working" }));
 
-      // 4. Synthesizer
-      addLog("AGNT: Synthesizer > Stream generating...");
-      const fullText = await streamResumeWithQualityRetry(
-        "Write a high-impact resume summary (max 150 words) incorporating the user profile and these market trends. Output plain text only with no preface like 'Here is the summary'.",
-        `Profile: ${userInput}\nTrends: ${trends}`,
-        3,
+      // 4. Synthesizer — full structured resume document (FR-1.4)
+      addLog("AGNT: Synthesizer > Generating structured resume document...");
+      const doc = await generateStructuredResume(
+        "You are an expert resume writer. Create a complete, ATS-optimized resume document tailored to the market trends below, based ONLY on the candidate profile.",
+        `Candidate Profile:\n${userInput}\n\nTarget Market Trends: ${trends}`,
       );
-
-      const outputIssue = getResumeOutputIssue(fullText);
-      if (outputIssue) {
-        throw new Error(`Invalid synthesis output: ${outputIssue}`);
-      }
-
-      // If verification was overridden, prepend disclaimer
-      if (verification.status === 'overridden') {
-        setResumeOutput(`${verification.disclaimer}\n\n${fullText}`);
-      } else {
-        setResumeOutput(fullText);
-      }
+      renderAndSetResume(doc);
       setGenerationError("");
       setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
 
@@ -939,6 +821,7 @@ STRICT OUTPUT RULES:
     setSelectedJob(null);
     setResumeOutput("");
     setGenerationError("");
+    setAtsReport(null);
     setAgentStatus({ ingestion: "idle", verifier: "idle", scout: "working", analyst: "idle", synthesizer: "idle" });
 
     addLog(`AGNT: Scout > Scanning live market for "${marketIndustry}"...`);
@@ -1049,6 +932,14 @@ Return strictly a JSON array with objects containing: "id" (number), "title", "c
     addLog(`AGNT: Analyst > Gap Analysis for ${job.title}...`);
 
     try {
+        // Semantic + keyword ATS report against THIS job (FR-3.1/FR-3.2:
+        // the embeddings now drive a visible match report, not just a log line).
+        const jobText = `${job.title} ${job.requirements}`;
+        const userVec = await embedSmart(userInput);
+        const jobVec = await embedSmart(jobText);
+        const report = buildAtsReport(userInput, jobText, cosineSim(userVec as any, jobVec as any));
+        setAtsReport(report);
+        addLog(`AGNT: Analyst > ATS match ${report.matchScore}% for "${job.title}".`);
         const text = await llmText(
           `Compare User Profile: "${userInput}" 
 vs Job Requirements: "${job.requirements}".
@@ -1087,21 +978,14 @@ Return a JSON array of strings (the missing skills). If none, return empty array
       addLog("AGNT: Synthesizer > Bridging gaps and generating tailored resume...");
 
       try {
-          const fullText = await streamResumeWithQualityRetry(
-              "You are an expert Resume Strategist. Create a tailored resume summary that positions the candidate for the specific job, incorporating their new gap-fill explanation seamlessly. Output only the final summary text with no heading or preface.",
+          const doc = await generateStructuredResume(
+              "You are an expert Resume Strategist. Create a complete, ATS-optimized resume document that positions the candidate for the specific job below, weaving their gap-fill explanation in naturally.",
           `Target Job: ${selectedJob.title} at ${selectedJob.company}
-    Requirements: ${selectedJob.requirements}
-    Candidate Profile: ${userInput}
-    Gap Explanation (Dynamic Interview): ${gapResponse}
-
-    Generate the resume summary now.`,
-          3,
+Requirements: ${selectedJob.requirements}
+Candidate Profile: ${userInput}
+Gap Explanation (Dynamic Interview): ${gapResponse || 'None needed'}`,
           );
-
-          const outputIssue = getResumeOutputIssue(fullText);
-          if (outputIssue) {
-            throw new Error(`Invalid synthesis output: ${outputIssue}`);
-          }
+          renderAndSetResume(doc);
 
           setGenerationError("");
           setAgentStatus(prev => ({ ...prev, synthesizer: "success" }));
@@ -1120,7 +1004,8 @@ Return a JSON array of strings (the missing skills). If none, return empty array
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'generated_resume.md';
+      const safeName = userName.trim().replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '');
+      a.download = safeName ? `${safeName}_resume.md` : 'generated_resume.md';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1375,6 +1260,44 @@ Return a JSON array of strings (the missing skills). If none, return empty array
                   {isProcessing && <div className="text-cyan-500 terminal-cursor">_</div>}
                 </div>
               </div>
+
+              {/* ATS Match Report (FR-3.1/FR-3.2 made visible) */}
+              {atsReport && (
+                <div className="bg-slate-900 rounded-xl border border-slate-800 p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">ATS Match Report</h3>
+                    <span className={`text-lg font-bold ${atsReport.matchScore >= 70 ? 'text-emerald-400' : atsReport.matchScore >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>
+                      {atsReport.matchScore}%
+                    </span>
+                  </div>
+                  <div className="w-full h-2 bg-slate-800 rounded-full mb-4 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all ${atsReport.matchScore >= 70 ? 'bg-emerald-500' : atsReport.matchScore >= 40 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                      style={{ width: `${atsReport.matchScore}%` }}
+                    />
+                  </div>
+                  {atsReport.matchedKeywords.length > 0 && (
+                    <div className="mb-3">
+                      <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Matched Keywords</div>
+                      <div className="flex flex-wrap gap-1">
+                        {atsReport.matchedKeywords.map((kw) => (
+                          <span key={kw} className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[11px] font-mono">{kw}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {atsReport.missingKeywords.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Missing Keywords (consider adding evidence for these)</div>
+                      <div className="flex flex-wrap gap-1">
+                        {atsReport.missingKeywords.map((kw) => (
+                          <span key={kw} className="px-2 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/30 text-[11px] font-mono">{kw}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Resume Output */}
               <div className="flex-1 bg-white rounded-xl border border-slate-200 p-8 text-slate-800 shadow-2xl relative min-h-[500px] flex flex-col">
