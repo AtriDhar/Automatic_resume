@@ -322,16 +322,22 @@ app = FastAPI(
 )
 
 # CORS configuration (allow frontend origins)
+# NOTE: Starlette's CORSMiddleware does NOT expand wildcards inside allow_origins
+# (e.g. "https://*.vercel.app" matches nothing). Subdomain wildcards must go
+# through allow_origin_regex instead.
+_cors_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+]
+_frontend_url = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+if _frontend_url and _frontend_url != "*":
+    _cors_origins.append(_frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "https://*.vercel.app",
-        "https://*.netlify.app",
-        os.getenv("FRONTEND_URL", "*"),
-    ],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_origin_regex=r"https://[a-z0-9-]+(\.[a-z0-9-]+)*\.(vercel\.app|netlify\.app)",
+    allow_credentials=False,  # No cookies/auth used; keep least-privilege
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
     max_age=86400,  # Cache preflight for 24h

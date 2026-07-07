@@ -23,6 +23,63 @@ const json = (body: unknown, status = 200) =>
 
 const makeTraceId = () => `gen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
+// --- Abuse controls -------------------------------------------------------
+// This endpoint proxies paid LLM providers, so it must not be an open relay.
+// 1) Same-origin check: browser requests carry Origin/Referer; only accept
+//    our own deployment origin (or ALLOWED_ORIGINS override, comma-separated).
+// 2) Best-effort per-IP rate limit (in-memory per edge isolate; not a hard
+//    guarantee, but blocks naive quota-burning loops).
+
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 20;
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+const isOriginAllowed = (request: Request) => {
+  const raw = request.headers.get('origin') || request.headers.get('referer') || '';
+  if (!raw) return false; // browsers always send Origin on cross/same-origin POST
+
+  let originHost: string;
+  try {
+    originHost = new URL(raw).host;
+  } catch {
+    return false;
+  }
+
+  const extra = String(process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      try {
+        return new URL(s.includes('://') ? s : `https://${s}`).host;
+      } catch {
+        return s;
+      }
+    });
+
+  const selfHost = new URL(request.url).host;
+  const allowedHosts = new Set<string>([selfHost, 'localhost:3000', 'localhost:5173', ...extra]);
+  return allowedHosts.has(originHost);
+};
+
+const isRateLimited = (request: Request) => {
+  const ip =
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    request.headers.get('x-real-ip') ||
+    'unknown';
+
+  const now = Date.now();
+  const bucket = rateBuckets.get(ip);
+  if (!bucket || now >= bucket.resetAt) {
+    // Opportunistic cleanup to bound memory in long-lived isolates.
+    if (rateBuckets.size > 5000) rateBuckets.clear();
+    rateBuckets.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return false;
+  }
+  bucket.count += 1;
+  return bucket.count > RATE_LIMIT_MAX_REQUESTS;
+};
+
 const flattenTextParts = (body: GenerateRequest) => {
   if (typeof body.prompt === 'string' && body.prompt.trim()) return body.prompt.trim();
   const parts = Array.isArray(body.parts) ? body.parts : [];
@@ -114,6 +171,14 @@ const chooseProvider = () => {
 export default async function handler(request: Request) {
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
+  }
+
+  if (!isOriginAllowed(request)) {
+    return json({ error: 'Forbidden: origin not allowed' }, 403);
+  }
+
+  if (isRateLimited(request)) {
+    return json({ error: 'Rate limit exceeded. Try again in a minute.' }, 429);
   }
 
   const provider = chooseProvider();

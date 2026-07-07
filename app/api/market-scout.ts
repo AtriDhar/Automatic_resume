@@ -17,9 +17,29 @@ const json = (body: unknown, status = 200) =>
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   });
 
+// Same-origin gate: this is a reverse proxy for CORS bypass — it must only
+// serve our own frontend, not act as an open proxy for arbitrary callers.
+const isOriginAllowed = (request: Request) => {
+  const raw = request.headers.get('origin') || request.headers.get('referer') || '';
+  // GET navigations from our own app may omit Origin; fall back to Referer,
+  // and only hard-fail when a foreign origin is explicitly present.
+  if (!raw) return true;
+  try {
+    const originHost = new URL(raw).host;
+    const selfHost = new URL(request.url).host;
+    return originHost === selfHost || originHost === 'localhost:3000' || originHost === 'localhost:5173';
+  } catch {
+    return false;
+  }
+};
+
 export default async function handler(request: Request) {
   if (request.method !== 'GET') {
     return new Response('Method Not Allowed', { status: 405 });
+  }
+
+  if (!isOriginAllowed(request)) {
+    return json({ error: 'Forbidden: origin not allowed' }, 403);
   }
 
   const requestUrl = new URL(request.url);

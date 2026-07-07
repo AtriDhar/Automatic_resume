@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { GoogleGenAI } from "@google/genai";
 import { initResourceAgent, type ResourceConfig } from "./lib/resourceAgent";
 import { createEmbeddingsWorkerClient, type EmbeddingsClient } from "./lib/embeddings";
+import { useBackendWakeup } from "./lib/useBackendWakeup";
 
 // --- Icons (Inline SVGs) ---
 const Icons = {
@@ -324,10 +325,12 @@ const fetchBackendMarketScan = async (industry: string): Promise<Job[]> => {
   };
 
   const rows = Array.isArray(json?.results) ? json.results : [];
+  // NOTE: /api/mock-market-scan returns SAMPLE data — label it honestly so
+  // users never mistake it for live listings.
   return rows.slice(0, 3).map((r, i) => ({
     id: i + 1,
     title: r.title || `Role ${i + 1}`,
-    company: r.company || '(Backend)',
+    company: `${r.company || 'Unknown'} (Sample Data)`,
     requirements: r.chunks?.[0]?.text || 'See listing details',
   }));
 };
@@ -391,6 +394,9 @@ const App = () => {
   const marketCacheRef = useRef<Record<string, { jobs: Job[]; cachedAtIso: string }>>({});
   const sessionTimeoutRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
+
+  // "Ping-Before-Request" wake-up for the Render free-tier backend.
+  const backendWakeup = useBackendWakeup();
   
   const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatus>>({
     ingestion: "idle",
@@ -452,6 +458,10 @@ const App = () => {
   const purgeSession = (reason: string) => {
     setUserInput("");
     setResumeOutput("");
+    // Zero-retention (FR-1.6): PII metadata must not outlive the session either.
+    setUserName("");
+    setUserEmail("");
+    setUserPhone("");
     setLogs(prev => [...prev, `[${new Date().toLocaleTimeString('en-US', { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}] SYS: Session purged (${reason}).`]);
     setSelectedJob(null);
     setAvailableJobs([]);
@@ -480,6 +490,19 @@ const App = () => {
   useEffect(() => {
     isProcessingRef.current = isProcessing;
   }, [isProcessing]);
+
+  useEffect(() => {
+    // Wake the backend as soon as the user enters Market Mode so the cold
+    // start (up to ~30s on Render free tier) overlaps with them typing.
+    if (workflow === 'market') {
+      void backendWakeup.wakeUp().then((ok) => {
+        if (ok && backendWakeup.wasColdStart) {
+          addLog('SYS: Backend cold start completed; Market Agents ready.');
+        }
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflow]);
 
   useEffect(() => {
     // Ephemeral session behavior (SRS FR-1.6)
@@ -640,12 +663,16 @@ const App = () => {
     return embedText(text);
   };
 
-  const verifyCredentialsNow = async (profileText: string) => {
+  const verifyCredentialsNow = async (profileText: string): Promise<VerificationState> => {
+    // Returns the resulting state so callers can gate on it immediately.
+    // (Reading the `verification` state var right after this call would see a
+    // stale closure value — React state updates are async.)
     const summaryHash = simpleHash(profileText);
     setVerification({ status: 'working' });
     setAgentStatus(prev => ({ ...prev, verifier: 'working' }));
     addLog('AGNT: Verifier > Validating credentials (immediate)...');
 
+    let result: VerificationState;
     try {
       const text = await llmText(
         `You are a credential verifier.
@@ -662,19 +689,20 @@ Profile text:\n${profileText}`,
 
       const parsed = JSON.parse(text) as { status: 'verified' | 'failed'; confidence: number; reason: string };
       if (parsed.status === 'verified') {
-        setVerification({ status: 'verified', confidence: parsed.confidence ?? 1, summaryHash });
-        setAgentStatus(prev => ({ ...prev, verifier: 'success' }));
+        result = { status: 'verified', confidence: parsed.confidence ?? 1, summaryHash };
         addLog(`AGNT: Verifier > Verified (confidence ${(parsed.confidence ?? 1).toFixed(2)}).`);
       } else {
-        setVerification({ status: 'failed', reason: parsed.reason || 'Verification failed', summaryHash });
-        setAgentStatus(prev => ({ ...prev, verifier: 'error' }));
+        result = { status: 'failed', reason: parsed.reason || 'Verification failed', summaryHash };
         addLog(`AGNT: Verifier > FAILED: ${parsed.reason || 'Verification failed'}`);
       }
     } catch (e) {
-      setVerification({ status: 'failed', reason: `Verifier unavailable: ${asErrorMessage(e)}`, summaryHash });
-      setAgentStatus(prev => ({ ...prev, verifier: 'error' }));
+      result = { status: 'failed', reason: `Verifier unavailable: ${asErrorMessage(e)}`, summaryHash };
       addLog(`ERR: Verifier failed > ${asErrorMessage(e)}`);
     }
+
+    setVerification(result);
+    setAgentStatus(prev => ({ ...prev, verifier: result.status === 'verified' ? 'success' : 'error' }));
+    return result;
   };
 
   // --- Actions ---
@@ -823,13 +851,16 @@ STRICT OUTPUT RULES:
     
     try {
       // 1. Verifier gate (SRS FR-1.2)
-      const mustVerify = verification.status === 'idle' || verification.status === 'working';
+      // Use the fresh result (not the `verification` state var, which is a
+      // stale closure snapshot after an await).
+      let gateState: VerificationState = verification;
+      const mustVerify = gateState.status === 'idle' || gateState.status === 'working';
       if (mustVerify) {
-        await verifyCredentialsNow(userInput);
+        gateState = await verifyCredentialsNow(userInput);
       }
 
       // Block unless verified or overridden
-      if (verification.status === 'failed') {
+      if (gateState.status === 'failed') {
         addLog('SYS: Resume synthesis halted until you correct or override verification.');
         setGenerationError('Verification failed. Please correct details or override with disclaimer before synthesis.');
         setAgentStatus(prev => ({ ...prev, verifier: 'error' }));
@@ -958,6 +989,9 @@ STRICT OUTPUT RULES:
 
         // Backend-assisted fallback before LLM fallback.
         try {
+          // Ping-Before-Request: ensure the Render instance is awake before
+          // the real call so we fail fast instead of hanging on a cold start.
+          await backendWakeup.wakeUp();
           const backendJobs = await fetchBackendMarketScan(marketIndustry);
           if (backendJobs.length) {
             setAvailableJobs(backendJobs);
@@ -976,10 +1010,15 @@ Return strictly a JSON array with objects containing: "id" (number), "title", "c
           'application/json'
         );
 
-        const jobs = JSON.parse(text);
+        // These are LLM-imagined listings, not scraped data — label them so
+        // users never mistake them for live openings.
+        const jobs = (JSON.parse(text) as Job[]).map((j) => ({
+          ...j,
+          company: `${j.company} (AI-Suggested)`,
+        }));
         setAvailableJobs(jobs);
         marketCacheRef.current[marketIndustry] = { jobs, cachedAtIso: new Date().toISOString() };
-        addLog(`AGNT: Scout > Found ${jobs.length} open positions.`);
+        addLog(`AGNT: Scout > Generated ${jobs.length} representative roles (AI-suggested, not live listings).`);
         setAgentStatus(prev => ({ ...prev, scout: "success" }));
     } catch (e) {
         const cached = marketCacheRef.current[marketIndustry];
@@ -1247,10 +1286,16 @@ Return a JSON array of strings (the missing skills). If none, return empty array
                         />
                     </div>
 
-                    <button 
+                    {backendWakeup.isWaking && (
+                      <div className="mb-3 flex items-center gap-2 text-xs text-purple-300 font-mono">
+                        <span className="animate-spin">⟳</span> Initializing Market Agents (backend waking up)...
+                      </div>
+                    )}
+
+                    <button
                       onClick={scanMarket}
                       disabled={isProcessing}
-                      className="w-full py-2 mb-6 rounded-lg font-bold bg-purple-600 hover:bg-purple-500 text-white shadow-lg flex justify-center items-center gap-2"
+                      className="w-full py-2 mb-6 rounded-lg font-bold bg-purple-600 hover:bg-purple-500 text-white shadow-lg flex justify-center items-center gap-2 disabled:opacity-60"
                     >
                        <Icons.Globe /> Scan Live Jobs
                     </button>
