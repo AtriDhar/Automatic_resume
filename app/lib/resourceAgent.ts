@@ -23,8 +23,12 @@ export type ResourceConfig = {
     workerUrl?: string;
   };
   inference: {
-    mode: "webllm" | "api";
-    apiUrl?: string;
+    // Honest capability report: in-browser inference (WebLLM) is NOT
+    // implemented in this build — generation always goes through the
+    // serverless proxy. "local" path therefore means: local *embeddings*
+    // (Transformers.js worker) + cloud inference.
+    mode: "api";
+    apiUrl: string;
   };
   marketScout: {
     mode: "proxy" | "backend";
@@ -35,11 +39,9 @@ export type ResourceConfig = {
 
 export type ResourceAgentOptions = {
   localMinScore?: number;
-  modelHydrationBudgetMs?: number;
 };
 
 const DEFAULT_LOCAL_MIN_SCORE = 70;
-const DEFAULT_MODEL_HYDRATION_BUDGET_MS = 45_000;
 
 export async function profileCapability(): Promise<CapabilityScore> {
   const webgpuAvailable = typeof (navigator as any).gpu !== "undefined";
@@ -69,58 +71,31 @@ export async function profileCapability(): Promise<CapabilityScore> {
   };
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error(`Timeout (${label}) after ${timeoutMs}ms`)), timeoutMs);
-    promise
-      .then((v) => {
-        window.clearTimeout(timer);
-        resolve(v);
-      })
-      .catch((e) => {
-        window.clearTimeout(timer);
-        reject(e);
-      });
-  });
-}
-
-async function tryInitLocalWithinBudget(budgetMs: number): Promise<boolean> {
-  // In this repo, the heavy lifting (WebLLM + worker) is initialized by the app.
-  // The ResourceAgent only enforces the time budget and checks platform capability.
-  // We keep this as a "soft probe" so the UI can fall back quickly.
-  try {
-    await withTimeout(Promise.resolve(true), budgetMs, "local-hydration-budget");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export async function initResourceAgent(opts: ResourceAgentOptions = {}): Promise<ResourceConfig> {
   const localMinScore = opts.localMinScore ?? DEFAULT_LOCAL_MIN_SCORE;
-  const modelHydrationBudgetMs = opts.modelHydrationBudgetMs ?? DEFAULT_MODEL_HYDRATION_BUDGET_MS;
 
   const capability = await profileCapability();
 
+  // "local" = run embeddings in a Transformers.js Web Worker on-device.
+  // The actual worker init happens in the app; if it fails or times out at
+  // runtime, embedSmart() falls back to the deterministic hashed embedding,
+  // so this decision only needs capability signals (instant + honest).
   const preferLocal = capability.webgpuAvailable && capability.deviceHighSpec && capability.score >= localMinScore;
 
   if (preferLocal) {
-    const ok = await tryInitLocalWithinBudget(modelHydrationBudgetMs);
-    if (ok) {
-      return {
-        path: "local",
-        reason: "webgpu+highspec",
-        embeddings: { mode: "worker", workerUrl: "/workers/embeddings.worker.js" },
-        inference: { mode: "webllm" },
-        marketScout: { mode: "backend", apiUrl: `${BACKEND_URL}/api/scrape` },
-        capability,
-      };
-    }
+    return {
+      path: "local",
+      reason: "webgpu+highspec: on-device embeddings, cloud inference",
+      embeddings: { mode: "worker", workerUrl: "/workers/embeddings.worker.js" },
+      inference: { mode: "api", apiUrl: "/api/generate" },
+      marketScout: { mode: "backend", apiUrl: `${BACKEND_URL}/api/scrape` },
+      capability,
+    };
   }
 
   return {
     path: "cloud",
-    reason: preferLocal ? "local-init-timeout" : "low-capability",
+    reason: "low-capability: cloud embeddings + cloud inference",
     embeddings: { mode: "api" },
     inference: { mode: "api", apiUrl: "/api/generate" },
     marketScout: { mode: "backend", apiUrl: `${BACKEND_URL}/api/scrape` },
