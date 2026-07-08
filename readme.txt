@@ -69,6 +69,10 @@ Project Architecture (Honest Hybrid):
                         PRODUCTION DEPLOYMENT
 ================================================================================
 
+NOTE: The canonical, up-to-date deployment reference is DEPLOYMENT_GUIDE.md
+at the repo root (env-var reference, verification checklist, security
+posture, troubleshooting). The steps below are a condensed version.
+
 STEP 1: DEPLOY BACKEND TO RENDER (FREE TIER)
 ---------------------------------------------
    
