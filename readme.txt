@@ -3,15 +3,17 @@
    Implementation Guide
 ================================================================================
 
-Project Architecture:
---------------------
-  Browser (WebLLM + Transformers.js)  <---->  Render Backend (Pre-Processing)
+Project Architecture (Honest Hybrid):
+-------------------------------------
+  Browser (Transformers.js)           <---->  Render Backend (Pre-Processing)
           |                                           |
-          |--- Vector Embeddings (client)             |--- HTML Scraping
-          |--- LLM Inference (client)                 |--- NLP Cleaning
+          |--- Vector Embeddings (client worker)      |--- HTML Scraping
+          |--- ATS Match Report (client)              |--- NLP Cleaning
           |--- Semantic Search (client)               |--- Text Chunking
-          |                                           |
-          +-----------------> Vercel/Netlify (Static Hosting)
+          |
+          +---> /api/generate (Vercel/Netlify edge -> Gemini/NVIDIA)
+                LLM inference is CLOUD-side. In-browser WebLLM inference
+                is a roadmap item, not a shipped feature.
 
 ================================================================================
                         QUICK START (5 MINUTES)
@@ -29,8 +31,11 @@ Project Architecture:
    cp .env.example .env.local
    
    Edit .env.local:
-   - GEMINI_API_KEY=your_gemini_api_key_here
    - VITE_BACKEND_URL=http://localhost:8000
+   - DEV_API_PROXY=https://your-app.vercel.app   (recommended: proxies /api/*
+     to your deployment so no API key ever enters the client bundle)
+   - GEMINI_API_KEY only needed if you skip DEV_API_PROXY and opt into the
+     dev-only client fallback (EXPOSE_CLIENT_GEMINI_KEY=true).
 
 3. START BACKEND (Terminal 1)
 -----------------------------
@@ -140,7 +145,7 @@ Automatic_resume/
 │   ├── Dockerfile                # Optimized for 512MB RAM
 │   ├── requirements.txt          # Python dependencies
 │   ├── main.py                   # FastAPI application
-│   ├── types.py                  # Pydantic models
+│   ├── schemas.py                # Pydantic models
 │   ├── .env.example              # Backend env template
 │   ├── .dockerignore             # Docker build exclusions
 │   └── README.md                 # Backend documentation
@@ -229,12 +234,13 @@ useAutoWakeup(enabled)
 4. COMPUTE PATH SELECTION
 -------------------------
    resourceAgent.ts decides:
-   
+
    IF (WebGPU available AND high-spec device):
-     -> Local path: WebLLM + Worker embeddings
+     -> Local path: on-device Transformers.js worker embeddings
+        (LLM inference still goes through /api/generate)
    ELSE:
-     -> Cloud path: API calls + serverless fallback
-   
+     -> Cloud path: hashed-embedding fallback + serverless inference
+
    Market Scout always uses Render backend.
 
 ================================================================================

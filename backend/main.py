@@ -24,8 +24,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import nltk
-from nltk.tokenize import sent_tokenize, word_tokenize
-from nltk.corpus import stopwords
+from nltk.tokenize import sent_tokenize
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -192,11 +191,14 @@ def chunk_text(text: str, max_tokens: int = MAX_CHUNK_TOKENS, min_tokens: int = 
     for sentence in sentences:
         sentence_tokens = estimate_tokens(sentence)
         
-        # If single sentence exceeds max, split by words
+        # If single sentence exceeds max, split by words.
+        # Stride in WORDS, not tokens: tokens ~= words * 1.3, so slicing the
+        # word array with a token-sized stride produced ~30% oversized chunks.
         if sentence_tokens > max_tokens:
             words = sentence.split()
-            for i in range(0, len(words), max_tokens):
-                word_chunk = " ".join(words[i:i + max_tokens])
+            max_words = max(1, int(max_tokens / 1.3))
+            for i in range(0, len(words), max_words):
+                word_chunk = " ".join(words[i:i + max_words])
                 if estimate_tokens(word_chunk) >= min_tokens:
                     chunks.append(word_chunk)
             continue
