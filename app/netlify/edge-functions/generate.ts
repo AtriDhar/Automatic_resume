@@ -15,9 +15,57 @@ type GenerateRequest = {
   stream?: boolean;
 };
 
+// --- Abuse controls (mirrors app/api/generate.ts) ---------------------------
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 20;
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+const isOriginAllowed = (request: Request) => {
+  const raw = request.headers.get("origin") || request.headers.get("referer") || "";
+  if (!raw) return false; // browsers always send Origin on POST
+  try {
+    const originHost = new URL(raw).host;
+    const selfHost = new URL(request.url).host;
+    return originHost === selfHost || originHost === "localhost:3000" || originHost === "localhost:5173";
+  } catch {
+    return false;
+  }
+};
+
+const isRateLimited = (request: Request) => {
+  const ip =
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    request.headers.get("x-nf-client-connection-ip") ||
+    "unknown";
+
+  const now = Date.now();
+  const bucket = rateBuckets.get(ip);
+  if (!bucket || now >= bucket.resetAt) {
+    if (rateBuckets.size > 5000) rateBuckets.clear();
+    rateBuckets.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return false;
+  }
+  bucket.count += 1;
+  return bucket.count > RATE_LIMIT_MAX_REQUESTS;
+};
+
 export default async (request: Request, context: EdgeContext) => {
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  if (!isOriginAllowed(request)) {
+    return new Response(JSON.stringify({ error: "Forbidden: origin not allowed" }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  if (isRateLimited(request)) {
+    return new Response(JSON.stringify({ error: "Rate limit exceeded. Try again in a minute." }), {
+      status: 429,
+      headers: { "content-type": "application/json" },
+    });
   }
 
   const key = context.env.get("GEMINI_API_KEY");
