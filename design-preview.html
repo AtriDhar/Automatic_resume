@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARS-MME — Design System Preview: Agentic Control Room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Agentic Control Room — dark-first tokens */
+    --bg: #0A0E14;
+    --surface-1: #111721;
+    --surface-2: #1A2230;
+    --surface-3: #232D3F;
+    --text: #E6EBF2;
+    --text-muted: #8B98AB;
+    --text-faint: #5A6678;
+    --accent: #22D3EE;
+    --accent-dim: rgba(34, 211, 238, 0.12);
+    --success: #34D399;
+    --warning: #FBBF24;
+    --error: #F87171;
+    --paper: #FDFDFB;
+    --paper-text: #1C2128;
+    --paper-muted: #57606B;
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --font-ui: 'Geist', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-doc: 'Source Serif 4', Georgia, serif;
+  }
+  [data-theme="light"] {
+    --bg: #F4F6F9;
+    --surface-1: #FFFFFF;
+    --surface-2: #EDF0F5;
+    --surface-3: #E2E7EF;
+    --text: #1C2128;
+    --text-muted: #57606B;
+    --text-faint: #8B98AB;
+    --accent-dim: rgba(34, 211, 238, 0.15);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    line-height: 1.6;
+    transition: background 0.25s ease, color 0.25s ease;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 48px 24px; }
+  section { margin-bottom: 72px; }
+  h2.section-title {
+    font-size: 13px; font-weight: 600; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--text-faint);
+    margin-bottom: 24px; display: flex; align-items: center; gap: 12px;
+  }
+  h2.section-title::after { content: ""; flex: 1; height: 1px; background: var(--surface-3); }
+
+  /* Hero */
+  .hero { padding: 64px 0 24px; }
+  .hero .kicker {
+    font-family: var(--font-mono); font-size: 12px; color: var(--accent);
+    letter-spacing: 0.08em; margin-bottom: 16px;
+  }
+  .hero h1 { font-size: 52px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+  .hero h1 .dim { color: var(--text-muted); font-weight: 400; }
+  .hero p { margin-top: 16px; font-size: 17px; color: var(--text-muted); max-width: 640px; }
+  .toggle {
+    position: fixed; top: 20px; right: 20px; z-index: 10;
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--surface-3);
+    font-family: var(--font-mono); font-size: 12px; padding: 8px 14px;
+    border-radius: var(--radius-md); cursor: pointer;
+  }
+  .toggle:hover { border-color: var(--accent); }
+
+  /* Type specimens */
+  .spec { background: var(--surface-1); border: 1px solid var(--surface-3); border-radius: var(--radius-lg); padding: 32px; margin-bottom: 16px; }
+  .spec .role { font-family: var(--font-mono); font-size: 11px; color: var(--accent); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 12px; }
+  .spec .sample-ui { font-size: 32px; font-weight: 600; letter-spacing: -0.01em; }
+  .spec .sample-body { font-size: 15px; color: var(--text-muted); margin-top: 8px; max-width: 560px; }
+  .spec .sample-mono { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); }
+  .spec .sample-mono .ok { color: var(--success); }
+  .spec .sample-mono .agnt { color: var(--accent); }
+  .spec .sample-doc { font-family: var(--font-doc); font-size: 22px; color: var(--text); }
+  .spec .sample-doc-body { font-family: var(--font-doc); font-size: 15px; color: var(--text-muted); margin-top: 8px; max-width: 560px; }
+  .spec .why { margin-top: 16px; font-size: 13px; color: var(--text-faint); border-top: 1px solid var(--surface-3); padding-top: 12px; }
+
+  /* Palette */
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  .swatch { border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--surface-3); }
+  .swatch .chip { height: 72px; }
+  .swatch .label { padding: 10px 12px; background: var(--surface-1); }
+  .swatch .label .name { font-size: 12px; font-weight: 600; }
+  .swatch .label .hex { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+
+  /* Components */
+  .comp-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 20px; }
+  .btn {
+    font-family: var(--font-ui); font-size: 14px; font-weight: 600;
+    padding: 10px 20px; border-radius: var(--radius-md); border: 1px solid transparent;
+    cursor: pointer; transition: all 0.15s ease-out;
+  }
+  .btn-primary { background: var(--accent); color: #06282E; }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-secondary { background: var(--surface-2); color: var(--text); border-color: var(--surface-3); }
+  .btn-secondary:hover { border-color: var(--accent); }
+  .btn-ghost { background: transparent; color: var(--text-muted); }
+  .btn-ghost:hover { color: var(--accent); }
+  .alert { padding: 12px 16px; border-radius: var(--radius-md); font-size: 13px; border: 1px solid; display: flex; gap: 10px; margin-bottom: 10px; }
+  .alert-success { background: rgba(52, 211, 153, 0.08); border-color: rgba(52, 211, 153, 0.3); color: var(--success); }
+  .alert-warning { background: rgba(251, 191, 36, 0.08); border-color: rgba(251, 191, 36, 0.3); color: var(--warning); }
+  .alert-error { background: rgba(248, 113, 113, 0.08); border-color: rgba(248, 113, 113, 0.3); color: var(--error); }
+  .alert-info { background: var(--accent-dim); border-color: rgba(34, 211, 238, 0.3); color: var(--accent); }
+  input.field, textarea.field {
+    width: 100%; background: var(--bg); border: 1px solid var(--surface-3);
+    border-radius: var(--radius-md); padding: 10px 14px; color: var(--text);
+    font-family: var(--font-ui); font-size: 14px; margin-bottom: 10px;
+  }
+  input.field:focus, textarea.field:focus { outline: none; border-color: var(--accent); }
+
+  /* Mockup: control room */
+  .mock { background: var(--surface-1); border: 1px solid var(--surface-3); border-radius: var(--radius-lg); overflow: hidden; }
+  .mock-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 20px; border-bottom: 1px solid var(--surface-3); background: var(--surface-1);
+  }
+  .mock-logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; }
+  .mock-logo .mark {
+    width: 26px; height: 26px; border-radius: var(--radius-sm);
+    background: var(--accent); color: #06282E; display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  }
+  .mock-tabs { display: flex; background: var(--surface-2); border-radius: var(--radius-md); padding: 3px; }
+  .mock-tab { font-size: 13px; padding: 6px 14px; border-radius: var(--radius-sm); color: var(--text-muted); }
+  .mock-tab.active { background: var(--surface-3); color: var(--text); font-weight: 600; }
+  .mock-body { display: grid; grid-template-columns: 300px 1fr; min-height: 520px; }
+  @media (max-width: 800px) { .mock-body { grid-template-columns: 1fr; } }
+
+  /* Pipeline rail */
+  .rail { border-right: 1px solid var(--surface-3); padding: 24px 20px; background: var(--surface-1); }
+  .rail-title { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; color: var(--text-faint); text-transform: uppercase; margin-bottom: 18px; }
+  .stage { position: relative; padding: 0 0 4px 28px; }
+  .stage:not(:last-child)::before {
+    content: ""; position: absolute; left: 9px; top: 22px; bottom: -2px;
+    width: 2px; background: var(--surface-3);
+  }
+  .stage.done:not(:last-child)::before { background: var(--success); opacity: 0.45; }
+  .stage .dot {
+    position: absolute; left: 2px; top: 4px; width: 16px; height: 16px;
+    border-radius: 50%; border: 2px solid var(--surface-3); background: var(--surface-1);
+  }
+  .stage.done .dot { border-color: var(--success); background: var(--success); }
+  .stage.done .dot::after { content: "✓"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 9px; color: #05281C; font-weight: 700; }
+  .stage.active .dot { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-dim); }
+  .stage .s-name { font-size: 14px; font-weight: 600; }
+  .stage .s-detail { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); margin: 2px 0 16px; }
+  .stage.active .s-detail { color: var(--accent); }
+  .stage.pending .s-name { color: var(--text-faint); }
+
+  /* Document paper */
+  .doc-area { padding: 28px; background: var(--surface-2); display: flex; flex-direction: column; gap: 16px; }
+  .ats {
+    background: var(--surface-1); border: 1px solid var(--surface-3);
+    border-radius: var(--radius-md); padding: 14px 18px;
+  }
+  .ats-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .ats-top .t { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); }
+  .ats-top .score { font-family: var(--font-mono); font-size: 18px; font-weight: 700; color: var(--success); }
+  .ats-bar { height: 4px; background: var(--surface-3); border-radius: 2px; overflow: hidden; margin-bottom: 10px; }
+  .ats-bar span { display: block; height: 100%; width: 78%; background: var(--success); }
+  .kw { display: inline-block; font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; border-radius: var(--radius-sm); margin: 0 4px 4px 0; }
+  .kw.hit { background: rgba(52, 211, 153, 0.1); color: var(--success); border: 1px solid rgba(52, 211, 153, 0.25); }
+  .kw.miss { background: rgba(248, 113, 113, 0.08); color: var(--error); border: 1px solid rgba(248, 113, 113, 0.22); }
+
+  .paper {
+    background: var(--paper); color: var(--paper-text);
+    border-radius: var(--radius-sm); padding: 40px 48px;
+    font-family: var(--font-doc);
+    box-shadow: 0 8px 40px rgba(0,0,0,0.45), 0 1px 3px rgba(0,0,0,0.3);
+  }
+  .paper h3 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+  .paper .headline { font-size: 14px; font-weight: 600; color: var(--paper-muted); margin: 2px 0 4px; }
+  .paper .contact { font-family: var(--font-ui); font-size: 11.5px; color: var(--paper-muted); padding-bottom: 14px; border-bottom: 2px solid var(--paper-text); margin-bottom: 16px; }
+  .paper h4 { font-family: var(--font-ui); font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--paper-text); margin: 18px 0 6px; }
+  .paper p, .paper li { font-size: 13.5px; line-height: 1.55; }
+  .paper ul { padding-left: 18px; }
+  .paper .skills { font-family: var(--font-ui); font-size: 12px; }
+  .doc-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+  .note { font-size: 13px; color: var(--text-faint); margin-top: 16px; max-width: 720px; }
+  .risk-tag { font-family: var(--font-mono); font-size: 10px; color: var(--warning); border: 1px solid rgba(251,191,36,0.3); padding: 1px 7px; border-radius: var(--radius-sm); margin-left: 8px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<button class="toggle" onclick="document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'light' ? '' : 'light'">◐ toggle chrome theme</button>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="kicker">DESIGN SYSTEM PREVIEW — AGENTIC CONTROL ROOM</div>
+    <h1>ARS-MME <span class="dim">/ dark room, lit document</span></h1>
+    <p>The chrome is a control room: dark, precise, monospaced telemetry. The resume is paper: white, serif, the only lit surface. Your eye goes exactly where the value is.</p>
+  </div>
+
+  <section>
+    <h2 class="section-title">Typography — three fonts, three jobs</h2>
+    <div class="spec">
+      <div class="role">UI — Geist</div>
+      <div class="sample-ui">Initiate Synthesis</div>
+      <div class="sample-body">Interface text, buttons, labels, navigation. Geist is precise and quietly technical with tabular numerals for the ATS scores — without being the Inter default every AI dashboard ships with.</div>
+      <div class="why">Why not Inter: it's the "gave up on typography" signal. Geist keeps the same neutrality with an actual point of view.</div>
+    </div>
+    <div class="spec">
+      <div class="role">Agent telemetry — JetBrains Mono</div>
+      <div class="sample-mono">
+        [14:02:11] <span class="agnt">AGNT: Verifier</span> &gt; Verified (confidence 0.94)<br>
+        [14:02:13] <span class="agnt">AGNT: Scout</span> &gt; Trends: Cloud Engineering, DevOps, IaC<br>
+        [14:02:15] <span class="ok">SYS: ATS match 78% — 3 keywords missing</span>
+      </div>
+      <div class="why">Already in your stack — but scoped strictly to machine voice: logs, stage details, keyword chips, scores. Never headings.</div>
+    </div>
+    <div class="spec">
+      <div class="role">The document — Source Serif 4 <span class="risk-tag">RISK #1</span></div>
+      <div class="sample-doc">Senior Frontend Engineer — React &amp; Cloud Platforms</div>
+      <div class="sample-doc-body">The generated resume renders in a real serif on a paper surface. It reads as a credible printed document, not app output. No competitor does this — Rezi, Teal, and Kickresume all render output in the same sans as their UI.</div>
+      <div class="why">This is the memorable risk: the deliverable physically looks like the thing you'll hand a recruiter.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="section-title">Color — one accent, elevation by lightness</h2>
+    <div class="swatches">
+      <div class="swatch"><div class="chip" style="background:#0A0E14"></div><div class="label"><div class="name">Base</div><div class="hex">#0A0E14</div></div></div>
+      <div class="swatch"><div class="chip" style="background:#111721"></div><div class="label"><div class="name">Surface 1</div><div class="hex">#111721</div></div></div>
+      <div class="swatch"><div class="chip" style="background:#1A2230"></div><div class="label"><div class="name">Surface 2</div><div class="hex">#1A2230</div></div></div>
+      <div class="swatch"><div class="chip" style="background:#22D3EE"></div><div class="label"><div class="name">Accent · agent activity only</div><div class="hex">#22D3EE</div></div></div>
+      <div class="swatch"><div class="chip" style="background:#34D399"></div><div class="label"><div class="name">Success</div><div class="hex">#34D399</div></div></div>
+      <div class="swatch"><div class="chip" style="background:#FBBF24"></div><div class="label"><div class="name">Warning</div><div class="hex">#FBBF24</div></div></div>
+      <div class="swatch"><div class="chip" style="background:#F87171"></div><div class="label"><div class="name">Error</div><div class="hex">#F87171</div></div></div>
+      <div class="swatch"><div class="chip" style="background:#FDFDFB"></div><div class="label"><div class="name">Paper · document only</div><div class="hex">#FDFDFB</div></div></div>
+    </div>
+    <p class="note">Purple is retired. Expertise and Market modes are distinguished by content and iconography, not by competing hues — the product owns exactly one accent, and it means "an agent is working."</p>
+  </section>
+
+  <section>
+    <h2 class="section-title">Components</h2>
+    <div class="comp-row">
+      <button class="btn btn-primary">Initiate Synthesis</button>
+      <button class="btn btn-secondary">Scan Live Jobs</button>
+      <button class="btn btn-ghost">Download .md</button>
+    </div>
+    <div class="alert alert-info">◈ Backend cold start detected — Market Agents initializing (~20s)</div>
+    <div class="alert alert-success">✓ Credentials verified — confidence 0.94</div>
+    <div class="alert alert-warning">△ Verification inconclusive — correct details or override with disclaimer</div>
+    <div class="alert alert-error">✕ Synthesis failed — invalid document after 3 attempts</div>
+    <div style="max-width:380px; margin-top:16px;">
+      <input class="field" placeholder="Full name">
+      <input class="field" placeholder="Email">
+    </div>
+  </section>
+
+  <section>
+    <h2 class="section-title">The product — pipeline rail + paper document <span class="risk-tag" style="margin-left:8px">RISK #2</span></h2>
+    <div class="mock">
+      <div class="mock-header">
+        <div class="mock-logo"><div class="mark">AI</div> ARS-MME</div>
+        <div class="mock-tabs">
+          <div class="mock-tab active">Expertise</div>
+          <div class="mock-tab">Market</div>
+        </div>
+      </div>
+      <div class="mock-body">
+        <div class="rail">
+          <div class="rail-title">Agent Pipeline</div>
+          <div class="stage done">
+            <div class="dot"></div>
+            <div class="s-name">Ingestion</div>
+            <div class="s-detail">resume.pdf → 214 lines extracted</div>
+          </div>
+          <div class="stage done">
+            <div class="dot"></div>
+            <div class="s-name">Verifier</div>
+            <div class="s-detail">verified · confidence 0.94</div>
+          </div>
+          <div class="stage done">
+            <div class="dot"></div>
+            <div class="s-name">Market Scout</div>
+            <div class="s-detail">3 trends identified</div>
+          </div>
+          <div class="stage active">
+            <div class="dot"></div>
+            <div class="s-name">Analyst</div>
+            <div class="s-detail">embedding · computing match…</div>
+          </div>
+          <div class="stage pending">
+            <div class="dot"></div>
+            <div class="s-name">Synthesizer</div>
+            <div class="s-detail">waiting</div>
+          </div>
+        </div>
+        <div class="doc-area">
+          <div class="ats">
+            <div class="ats-top"><span class="t">ATS Match Report</span><span class="score">78%</span></div>
+            <div class="ats-bar"><span></span></div>
+            <span class="kw hit">react</span><span class="kw hit">typescript</span><span class="kw hit">aws</span><span class="kw hit">ci/cd</span><span class="kw miss">kubernetes</span><span class="kw miss">terraform</span>
+          </div>
+          <div class="paper">
+            <h3>Alex Morgan</h3>
+            <div class="headline">Senior Frontend Engineer — React &amp; Cloud Platforms</div>
+            <div class="contact">alex.morgan@email.com&ensp;|&ensp;+1 (555) 012-3456</div>
+            <h4>Professional Summary</h4>
+            <p>Frontend engineer with five years of experience shipping React applications at scale. AWS-certified developer with a track record of cutting build times 40% and leading migrations to TypeScript across three product teams.</p>
+            <h4>Skills</h4>
+            <p class="skills">React · TypeScript · Node.js · AWS · CI/CD · Vite · Testing Library · GraphQL</p>
+            <h4>Experience</h4>
+            <p style="font-weight:600">Senior Frontend Engineer — Various (5 years)</p>
+            <ul>
+              <li>Led TypeScript migration across 3 product teams, cutting type-related defects 60%</li>
+              <li>Reduced CI build time 40% by parallelizing the test suite</li>
+              <li>Earned AWS Certified Developer credential; owned deployment pipeline</li>
+            </ul>
+          </div>
+          <div class="doc-actions">
+            <button class="btn btn-ghost">Download .md</button>
+            <button class="btn btn-primary">Export PDF</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="note">The rail replaces the five badge rows — each stage shows what it <em>produced</em>, the active stage glows with the single accent, completed stages connect with a green thread. The document sits on paper with a drop shadow: the one lit object in the room.</p>
+  </section>
+
+</div>
+</body>
+</html>
