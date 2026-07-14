@@ -67,6 +67,13 @@ Every design decision serves this. The chrome is a **control room**: dark, preci
 - **Banned:** pulsing badges, gradient animations, spinners longer than the wait they represent.
 - **Easing:** enter(ease-out) exit(ease-in) move(ease-in-out). Duration: micro(100ms) short(200ms) medium(300ms).
 
+### Marketing surfaces (landing page only)
+The landing (`app/index.html`, served at `/`) may additionally use:
+- **Scroll-reveal entrances:** opacity + translateY(≤14px), ≤450ms ease-out, stagger ≤180ms, one-time (IntersectionObserver, unobserve after reveal).
+- **Product-narrative loops:** animation that depicts *real product behavior* (the pipeline demo: stages completing, telemetry typing, ATS bar filling, paper assembling). Loops pause when off-screen or tab-hidden.
+- Still banned everywhere: parallax, gradient motion, decorative particles/blobs, autoplaying media.
+- **`prefers-reduced-motion: reduce` is mandatory:** show the completed state, animate nothing.
+
 ## Anti-Patterns (hard bans)
 - Purple/violet anywhere. Gradient buttons. `slate-*` default palette.
 - Inter / Roboto / system-ui as a chosen font.
@@ -82,3 +89,6 @@ Every design decision serves this. The chrome is a **control room**: dark, preci
 | 2026-07-10 | Pipeline rail over badges (Risk #2) | Strongest 2026 agent pattern: per-stage output, not binary status flips |
 | 2026-07-10 | Single accent, purple retired (Risk #3) | Ownable identity; cyan = agent activity, semantically consistent |
 | 2026-07-10 | Tailwind kept via CDN + token config for now | Full build-time Tailwind is tracked debt; tokens enforced through inline config so no raw slate/purple classes survive |
+| 2026-07-14 | MPA split: landing at `/`, console at `/app/` | Marketing surface loads instantly (no React/Tailwind CDN); app entry untouched at `app/app/index.html` |
+| 2026-07-14 | Landing signature: live pipeline demo in hero | The memorable thing IS the product; demo mirrors console tokens/patterns 1:1, honest data, loops only while visible |
+| 2026-07-14 | Marketing-motion addendum | Scroll reveals + product-narrative loops allowed on landing only; reduced-motion mandatory; parallax/gradient motion still banned |

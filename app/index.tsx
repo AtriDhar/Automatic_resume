@@ -1043,12 +1043,12 @@ Gap Explanation (Dynamic Interview): ${gapResponse || 'None needed'}`,
       {/* Header */}
       <header className="border-b border-surface-3 bg-surface-1/80 backdrop-blur-md sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
+          <a href="/" className="flex items-center gap-2.5" aria-label="ARS-MME home">
             <div className="w-7 h-7 bg-accent rounded flex items-center justify-center text-accent-ink font-mono font-bold text-xs">
               AI
             </div>
-            <h1 className="font-bold text-lg tracking-tight">ARS-MME <span className="text-ink-faint font-normal text-sm ml-2 hidden sm:inline">Agentic Resume Engine</span></h1>
-          </div>
+            <h1 className="font-bold text-lg tracking-tight">ARS-MME <span className="text-ink-faint font-normal text-sm ml-2 hidden sm:inline">Agent Console</span></h1>
+          </a>
           <div className="flex bg-surface-2 rounded-lg p-1">
             <button onClick={() => setWorkflow('expertise')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors duration-200 ${workflow === 'expertise' ? 'bg-surface-3 text-ink' : 'text-ink-muted hover:text-ink'}`}>Expertise</button>
             <button onClick={() => setWorkflow('market')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors duration-200 ${workflow === 'market' ? 'bg-surface-3 text-ink' : 'text-ink-muted hover:text-ink'}`}>Market</button>

@@ -25,6 +25,15 @@ export default defineConfig(({ mode }) => {
           : undefined,
       },
       plugins: [react()],
+      build: {
+        rollupOptions: {
+          input: {
+            // Marketing landing at "/", agent console at "/app/"
+            landing: path.resolve(__dirname, 'index.html'),
+            app: path.resolve(__dirname, 'app/index.html'),
+          },
+        },
+      },
       define: {
         'process.env.API_KEY': JSON.stringify(exposeClientKey ? geminiApiKey : ''),
         'process.env.GEMINI_API_KEY': JSON.stringify(exposeClientKey ? geminiApiKey : '')

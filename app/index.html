@@ -1,85 +1,734 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ARS-MME | Agentic Resume Engine</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&display=swap" rel="stylesheet">
-    <script>
-      /* DESIGN.md tokens — Agentic Control Room.
-         All UI color/font classes must come from this config, never Tailwind defaults. */
-      tailwind.config = {
-        theme: {
-          extend: {
-            colors: {
-              base: '#0A0E14',
-              surface: { 1: '#111721', 2: '#1A2230', 3: '#232D3F' },
-              ink: { DEFAULT: '#E6EBF2', muted: '#8B98AB', faint: '#5A6678' },
-              accent: { DEFAULT: '#22D3EE', ink: '#06282E' },
-              ok: '#34D399',
-              warn: '#FBBF24',
-              err: '#F87171',
-              paper: { DEFAULT: '#FDFDFB', ink: '#1C2128', muted: '#57606B' },
-            },
-            fontFamily: {
-              sans: ['Geist', 'system-ui', 'sans-serif'],
-              mono: ['JetBrains Mono', 'monospace'],
-              doc: ['"Source Serif 4"', 'Georgia', 'serif'],
-            },
-          },
-        },
-      };
-    </script>
-    <style>
-      body {
-        font-family: 'Geist', system-ui, sans-serif;
-        background-color: #0A0E14;
-        color: #E6EBF2;
-      }
-      ::selection { background: rgba(34, 211, 238, 0.25); }
-      /* Custom Scrollbar */
-      ::-webkit-scrollbar { width: 8px; height: 8px; }
-      ::-webkit-scrollbar-track { background: #111721; }
-      ::-webkit-scrollbar-thumb { background: #232D3F; border-radius: 4px; }
-      ::-webkit-scrollbar-thumb:hover { background: #2E3A50; }
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ARS-MME — Watch AI agents build your resume</title>
+  <meta name="description" content="Five specialized AI agents verify your credentials, scan live job feeds, measure ATS fit, and write a recruiter-ready resume in front of you. Zero data retention, no account, free." />
+  <meta name="theme-color" content="#0A0E14" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="canonical" href="https://automatic-resume-s59a.vercel.app/" />
 
-      .terminal-cursor::after {
-        content: '▋';
-        animation: blink 1s step-start infinite;
-      }
-      @keyframes blink { 50% { opacity: 0; } }
+  <!-- Open Graph / Twitter -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="ARS-MME" />
+  <meta property="og:title" content="ARS-MME — Watch AI agents build your resume" />
+  <meta property="og:description" content="Five agents verify, scan the live market, measure ATS fit, and synthesize a recruiter-ready document — with zero data retention." />
+  <meta property="og:url" content="https://automatic-resume-s59a.vercel.app/" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="ARS-MME — Watch AI agents build your resume" />
+  <meta name="twitter:description" content="Five agents verify, scan the live market, measure ATS fit, and synthesize a recruiter-ready document — with zero data retention." />
 
-      /* Pipeline rail (DESIGN.md signature pattern #1) */
-      .stage-thread {
-        position: absolute; left: 7px; top: 20px; bottom: -4px;
-        width: 2px; background: #232D3F;
-      }
-      .stage-thread.done { background: rgba(52, 211, 153, 0.45); }
-      .stage-dot-active { box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.12); }
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&display=swap" rel="stylesheet">
 
-      /* Paper document (DESIGN.md signature pattern #2) */
-      .paper-sheet {
-        background: #FDFDFB; color: #1C2128;
-        box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
-      }
-    </style>
-  <script type="importmap">
-{
-  "imports": {
-    "@google/genai": "https://esm.sh/@google/genai@^1.32.0",
-    "react/": "https://esm.sh/react@^19.2.1/",
-    "react": "https://esm.sh/react@^19.2.1",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.1/"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
+  <style>
+    /* ============ DESIGN.md tokens — Agentic Control Room ============ */
+    :root {
+      --bg: #0A0E14;
+      --surface-1: #111721;
+      --surface-2: #1A2230;
+      --surface-3: #232D3F;
+      --text: #E6EBF2;
+      --text-muted: #8B98AB;
+      --text-faint: #5A6678;
+      --accent: #22D3EE;
+      --accent-ink: #06282E;
+      --accent-dim: rgba(34, 211, 238, 0.12);
+      --success: #34D399;
+      --warning: #FBBF24;
+      --error: #F87171;
+      --paper: #FDFDFB;
+      --paper-ink: #1C2128;
+      --paper-muted: #57606B;
+      --r-sm: 4px; --r-md: 8px; --r-lg: 12px;
+      --font-ui: 'Geist', system-ui, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+      --font-doc: 'Source Serif 4', Georgia, serif;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: var(--font-ui); line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    ::selection { background: rgba(34, 211, 238, 0.25); }
+    a { color: inherit; text-decoration: none; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+    /* ============ Scroll reveal (motion = state communication) ============ */
+    .rv { opacity: 0; transform: translateY(14px); transition: opacity 0.45s ease-out, transform 0.45s ease-out; }
+    .rv.in { opacity: 1; transform: none; }
+    .rv-d1 { transition-delay: 0.06s; } .rv-d2 { transition-delay: 0.12s; } .rv-d3 { transition-delay: 0.18s; }
+
+    /* ============ Nav ============ */
+    nav {
+      position: sticky; top: 0; z-index: 40;
+      background: rgba(10, 14, 20, 0.82); backdrop-filter: blur(12px);
+      border-bottom: 1px solid transparent; transition: border-color 0.2s ease-out;
+    }
+    nav.scrolled { border-bottom-color: var(--surface-3); }
+    .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+    .mark {
+      width: 26px; height: 26px; border-radius: var(--r-sm);
+      background: var(--accent); color: var(--accent-ink);
+      display: grid; place-items: center;
+      font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+    }
+    .nav-links { display: flex; align-items: center; gap: 26px; font-size: 14px; color: var(--text-muted); }
+    .nav-links a:hover { color: var(--text); }
+    .nav-links .to-app { color: var(--accent-ink); background: var(--accent); font-weight: 600; padding: 8px 16px; border-radius: var(--r-md); transition: filter 0.15s ease-out; }
+    .nav-links .to-app:hover { filter: brightness(1.1); color: var(--accent-ink); }
+    @media (max-width: 720px) { .nav-links a:not(.to-app) { display: none; } }
+
+    /* ============ Hero ============ */
+    .hero { padding: 84px 0 56px; }
+    .hero-grid { display: grid; grid-template-columns: 1.02fr 1fr; gap: 48px; align-items: center; }
+    @media (max-width: 960px) { .hero-grid { grid-template-columns: 1fr; } }
+    .kicker {
+      font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.14em;
+      color: var(--accent); text-transform: uppercase; margin-bottom: 18px;
+    }
+    h1 {
+      font-size: clamp(34px, 5vw, 54px); font-weight: 700;
+      letter-spacing: -0.022em; line-height: 1.08;
+    }
+    h1 .dim { color: var(--text-faint); font-weight: 500; }
+    .hero p.sub { margin-top: 20px; font-size: 17px; color: var(--text-muted); max-width: 520px; }
+    .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+    .btn {
+      font-family: var(--font-ui); font-size: 15px; font-weight: 600;
+      padding: 12px 22px; border-radius: var(--r-md); border: 1px solid transparent;
+      cursor: pointer; transition: filter 0.15s ease-out, border-color 0.15s ease-out, color 0.15s ease-out;
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    .btn-primary { background: var(--accent); color: var(--accent-ink); }
+    .btn-primary:hover { filter: brightness(1.1); }
+    .btn-ghost { background: transparent; color: var(--text-muted); border-color: var(--surface-3); }
+    .btn-ghost:hover { color: var(--text); border-color: var(--text-faint); }
+    .readout {
+      margin-top: 30px; font-family: var(--font-mono); font-size: 12px;
+      color: var(--text-faint); letter-spacing: 0.02em;
+    }
+    .readout b { color: var(--text-muted); font-weight: 500; }
+
+    /* ============ The demo — a miniature of the real console ============ */
+    .demo {
+      background: var(--surface-1); border: 1px solid var(--surface-3);
+      border-radius: var(--r-lg); overflow: hidden;
+      display: grid; grid-template-columns: 214px 1fr; min-height: 460px;
+    }
+    @media (max-width: 560px) { .demo { grid-template-columns: 1fr; } }
+    .demo-rail { border-right: 1px solid var(--surface-3); padding: 18px 16px; }
+    @media (max-width: 560px) { .demo-rail { border-right: 0; border-bottom: 1px solid var(--surface-3); } }
+    .demo-label {
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em;
+      color: var(--text-faint); text-transform: uppercase; margin-bottom: 14px;
+    }
+    .stg { position: relative; padding-left: 24px; }
+    .stg .thread {
+      position: absolute; left: 7px; top: 18px; bottom: -2px; width: 2px;
+      background: var(--surface-3);
+    }
+    .stg .thread::after {
+      content: ""; position: absolute; inset: 0; transform: scaleY(0); transform-origin: top;
+      background: rgba(52, 211, 153, 0.5); transition: transform 0.4s ease-out;
+    }
+    .stg.done .thread::after { transform: scaleY(1); }
+    .stg .dot {
+      position: absolute; left: 0; top: 3px; width: 15px; height: 15px;
+      border-radius: 50%; border: 2px solid var(--surface-3); background: var(--surface-1);
+      display: grid; place-items: center; font-size: 8px; font-weight: 700; color: transparent;
+      transition: border-color 0.2s ease-out, background 0.2s ease-out;
+    }
+    .stg.active .dot { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-dim); }
+    .stg.done .dot { border-color: var(--success); background: var(--success); color: #05281C; }
+    .stg .s-name { font-size: 13px; font-weight: 600; color: var(--text-faint); transition: color 0.2s ease-out; }
+    .stg.active .s-name, .stg.done .s-name { color: var(--text); }
+    .stg .s-detail {
+      font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint);
+      min-height: 15px; margin: 1px 0 12px; white-space: nowrap; overflow: hidden;
+    }
+    .stg.active .s-detail { color: var(--accent); }
+    .stg.done .s-detail { color: var(--text-faint); }
+
+    .demo-out { padding: 16px; background: var(--surface-2); display: flex; flex-direction: column; gap: 12px; }
+    .demo-ats {
+      background: var(--surface-1); border: 1px solid var(--surface-3);
+      border-radius: var(--r-md); padding: 10px 14px;
+      opacity: 0; transition: opacity 0.3s ease-out;
+    }
+    .demo-ats.show { opacity: 1; }
+    .demo-ats .top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+    .demo-ats .t { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); }
+    .demo-ats .score { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--success); font-variant-numeric: tabular-nums; }
+    .demo-ats .bar { height: 3px; background: var(--surface-3); border-radius: 2px; overflow: hidden; margin-bottom: 8px; }
+    .demo-ats .bar span { display: block; height: 100%; width: 0; background: var(--success); transition: width 0.7s ease-out; }
+    .kw { display: inline-block; font-family: var(--font-mono); font-size: 10px; padding: 1px 7px; border-radius: var(--r-sm); margin: 0 3px 3px 0; }
+    .kw.hit { background: rgba(52, 211, 153, 0.1); color: var(--success); border: 1px solid rgba(52, 211, 153, 0.25); }
+    .kw.miss { background: rgba(248, 113, 113, 0.08); color: var(--error); border: 1px solid rgba(248, 113, 113, 0.22); }
+
+    .demo-paper {
+      background: var(--paper); color: var(--paper-ink); border-radius: var(--r-sm);
+      padding: 22px 26px; font-family: var(--font-doc); flex: 1;
+      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+    }
+    .demo-paper .pseg { opacity: 0; transform: translateY(6px); transition: opacity 0.35s ease-out, transform 0.35s ease-out; }
+    .demo-paper .pseg.show { opacity: 1; transform: none; }
+    .demo-paper h3 { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+    .demo-paper .hd { font-size: 11px; font-weight: 600; color: var(--paper-muted); }
+    .demo-paper .rule { border-bottom: 2px solid var(--paper-ink); margin: 8px 0 10px; }
+    .demo-paper h4 { font-family: var(--font-ui); font-size: 8.5px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; margin: 10px 0 3px; }
+    .demo-paper p, .demo-paper li { font-size: 10.5px; line-height: 1.5; }
+    .demo-paper ul { padding-left: 14px; }
+    .demo-paper .sk { font-family: var(--font-ui); font-size: 9.5px; }
+
+    /* ============ Sections ============ */
+    section { padding: 88px 0; }
+    .sec-kicker {
+      font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.16em;
+      color: var(--accent); text-transform: uppercase; margin-bottom: 14px;
+    }
+    .sec-title { font-size: clamp(26px, 3.4vw, 36px); font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; max-width: 640px; }
+    .sec-sub { margin-top: 14px; font-size: 16px; color: var(--text-muted); max-width: 560px; }
+
+    /* Pipeline (numbered — the order IS the execution order) */
+    .pipe { margin-top: 48px; display: grid; gap: 0; }
+    .pipe-row {
+      display: grid; grid-template-columns: 64px 1fr 260px; gap: 24px;
+      padding: 26px 0; border-top: 1px solid var(--surface-3); align-items: baseline;
+    }
+    .pipe-row:last-child { border-bottom: 1px solid var(--surface-3); }
+    @media (max-width: 760px) { .pipe-row { grid-template-columns: 48px 1fr; } .pipe-out { grid-column: 2; } }
+    .pipe-num { font-family: var(--font-mono); font-size: 13px; color: var(--text-faint); }
+    .pipe-name { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+    .pipe-desc { font-size: 14.5px; color: var(--text-muted); max-width: 560px; }
+    .pipe-out { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); }
+    .pipe-out b { color: var(--success); font-weight: 500; }
+
+    /* Document section */
+    .doc-grid { display: grid; grid-template-columns: 1fr 1.05fr; gap: 56px; margin-top: 48px; align-items: center; }
+    @media (max-width: 880px) { .doc-grid { grid-template-columns: 1fr; } }
+    .doc-points { display: flex; flex-direction: column; gap: 22px; }
+    .doc-point .dp-t { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+    .doc-point .dp-d { font-size: 14.5px; color: var(--text-muted); }
+    .doc-point .dp-m { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); margin-top: 6px; }
+    .paper-lg {
+      background: var(--paper); color: var(--paper-ink); border-radius: var(--r-sm);
+      padding: 40px 44px; font-family: var(--font-doc);
+      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+    }
+    .paper-lg h3 { font-size: 24px; font-weight: 700; letter-spacing: -0.01em; }
+    .paper-lg .hd { font-size: 13px; font-weight: 600; color: var(--paper-muted); }
+    .paper-lg .ct { font-family: var(--font-ui); font-size: 10.5px; color: var(--paper-muted); margin-top: 2px; }
+    .paper-lg .rule { border-bottom: 2px solid var(--paper-ink); margin: 12px 0 14px; }
+    .paper-lg h4 { font-family: var(--font-ui); font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; margin: 14px 0 4px; }
+    .paper-lg p, .paper-lg li { font-size: 12.5px; line-height: 1.55; }
+    .paper-lg ul { padding-left: 16px; }
+    .paper-lg .sk { font-family: var(--font-ui); font-size: 11px; }
+
+    /* Capability rows — editorial, not icon-grid */
+    .cap { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: center; padding: 44px 0; border-top: 1px solid var(--surface-3); }
+    .cap:last-of-type { border-bottom: 1px solid var(--surface-3); }
+    @media (max-width: 880px) { .cap { grid-template-columns: 1fr; gap: 28px; } .cap.flip .cap-visual { order: -1; } }
+    .cap-t { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+    .cap-d { font-size: 15px; color: var(--text-muted); max-width: 460px; }
+    .cap-m { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); margin-top: 10px; }
+    .cap-visual {
+      background: var(--surface-1); border: 1px solid var(--surface-3);
+      border-radius: var(--r-lg); padding: 20px;
+    }
+    .jobcard { border: 1px solid var(--surface-3); border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 8px; }
+    .jobcard.sel { border-color: var(--accent); background: var(--accent-dim); }
+    .jobcard .jt { font-size: 13.5px; font-weight: 600; }
+    .jobcard .jc { font-size: 12px; color: var(--text-muted); }
+    .jobcard .jtag { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-faint); }
+    .vline { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-md); font-size: 12.5px; border: 1px solid; margin-bottom: 8px; }
+    .v-ok { background: rgba(52, 211, 153, 0.07); border-color: rgba(52, 211, 153, 0.25); color: var(--success); }
+    .v-warn { background: rgba(251, 191, 36, 0.07); border-color: rgba(251, 191, 36, 0.25); color: var(--warning); }
+    .ledger { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+    .ledger div { padding: 7px 0; border-bottom: 1px dashed var(--surface-3); display: flex; justify-content: space-between; gap: 16px; }
+    .ledger div:last-child { border-bottom: 0; }
+    .ledger .k { color: var(--text-faint); }
+    .ledger .ok { color: var(--success); }
+
+    /* Privacy */
+    .priv { background: var(--surface-1); border-top: 1px solid var(--surface-3); border-bottom: 1px solid var(--surface-3); }
+    .priv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: start; }
+    @media (max-width: 880px) { .priv-grid { grid-template-columns: 1fr; } }
+    .priv-ledger { font-family: var(--font-mono); font-size: 13px; }
+    .priv-ledger div { display: grid; grid-template-columns: 200px 1fr; gap: 18px; padding: 13px 0; border-bottom: 1px dashed var(--surface-3); }
+    .priv-ledger div:last-child { border-bottom: 0; }
+    @media (max-width: 560px) { .priv-ledger div { grid-template-columns: 1fr; gap: 2px; } }
+    .priv-ledger .k { color: var(--text-faint); }
+    .priv-ledger .v { color: var(--text-muted); }
+    .priv-ledger .v b { color: var(--text); font-weight: 500; }
+
+    /* FAQ */
+    .faq { max-width: 760px; margin-top: 40px; }
+    .faq details { border-top: 1px solid var(--surface-3); }
+    .faq details:last-child { border-bottom: 1px solid var(--surface-3); }
+    .faq summary {
+      cursor: pointer; list-style: none; display: flex; justify-content: space-between; align-items: center;
+      padding: 20px 0; font-size: 16px; font-weight: 600; gap: 16px;
+    }
+    .faq summary::-webkit-details-marker { display: none; }
+    .faq summary::after { content: "+"; font-family: var(--font-mono); color: var(--text-faint); font-size: 16px; transition: transform 0.2s ease-out; }
+    .faq details[open] summary::after { transform: rotate(45deg); }
+    .faq .a { padding: 0 0 20px; font-size: 14.5px; color: var(--text-muted); max-width: 640px; }
+
+    /* CTA band */
+    .cta-band { text-align: left; border-top: 1px solid var(--surface-3); }
+    .cta-band .inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 24px; }
+    .cta-band h2 { font-size: clamp(22px, 3vw, 30px); font-weight: 700; letter-spacing: -0.02em; max-width: 560px; line-height: 1.2; }
+
+    /* Footer */
+    footer { border-top: 1px solid var(--surface-3); padding: 48px 0 40px; }
+    .foot-grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 40px; }
+    @media (max-width: 720px) { .foot-grid { grid-template-columns: 1fr; } }
+    .foot-brand p { margin-top: 12px; font-size: 13px; color: var(--text-faint); max-width: 300px; }
+    .foot-col .h { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 14px; }
+    .foot-col a { display: block; font-size: 14px; color: var(--text-muted); padding: 4px 0; }
+    .foot-col a:hover { color: var(--text); }
+    .fine { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--surface-2); font-size: 12px; color: var(--text-faint); display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; }
+
+    /* ============ Reduced motion: show everything, animate nothing ============ */
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .rv, .demo-paper .pseg { opacity: 1; transform: none; transition: none; }
+      .demo-ats { opacity: 1; }
+      .stg .thread::after { transition: none; }
+    }
+  </style>
 </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/index.tsx"></script>
-  </body>
+<body>
+
+  <nav id="nav" aria-label="Main">
+    <div class="wrap nav-inner">
+      <a class="brand" href="/"><span class="mark">AI</span>ARS-MME</a>
+      <div class="nav-links">
+        <a href="#pipeline">Pipeline</a>
+        <a href="#document">Document</a>
+        <a href="#privacy">Privacy</a>
+        <a href="https://github.com/AtriDhar/Automatic_resume" rel="noopener">GitHub</a>
+        <a class="to-app" href="/app/">Launch the engine</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ============ HERO ============ -->
+  <header class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <div class="kicker rv">Agentic resume synthesis · zero retention</div>
+        <h1 class="rv rv-d1">Watch AI agents build your resume.<br><span class="dim">Live, in front of you.</span></h1>
+        <p class="sub rv rv-d2">Five specialized agents verify your credentials, scan live job feeds, measure ATS fit, and write a recruiter-ready document. Your data lives for the session — then it's gone.</p>
+        <div class="cta-row rv rv-d3">
+          <a class="btn btn-primary" href="/app/">Launch the engine</a>
+          <a class="btn btn-ghost" href="#pipeline">Watch the pipeline ↓</a>
+        </div>
+        <div class="readout rv rv-d3" aria-label="System facts">▸ stored <b>0 bytes</b> · agents <b>5</b> · modes <b>2</b> · account <b>none</b> · price <b>$0</b></div>
+      </div>
+
+      <!-- The signature element: a self-running miniature of the real console -->
+      <div class="demo rv rv-d2" id="demo" aria-label="Live demonstration of the agent pipeline building a resume">
+        <div class="demo-rail">
+          <div class="demo-label">Agent pipeline</div>
+          <div class="stg" data-stage="0"><span class="thread"></span><span class="dot">✓</span>
+            <div class="s-name">Ingestion</div><div class="s-detail" data-detail="resume.pdf · 214 words"></div>
+          </div>
+          <div class="stg" data-stage="1"><span class="thread"></span><span class="dot">✓</span>
+            <div class="s-name">Verifier</div><div class="s-detail" data-detail="verified · confidence 0.94"></div>
+          </div>
+          <div class="stg" data-stage="2"><span class="thread"></span><span class="dot">✓</span>
+            <div class="s-name">Market Scout</div><div class="s-detail" data-detail="31 live jobs · Remotive"></div>
+          </div>
+          <div class="stg" data-stage="3"><span class="thread"></span><span class="dot">✓</span>
+            <div class="s-name">Analyst</div><div class="s-detail" data-detail="ATS match 78% · 3 gaps"></div>
+          </div>
+          <div class="stg" data-stage="4"><span class="dot">✓</span>
+            <div class="s-name">Synthesizer</div><div class="s-detail" data-detail="4 roles · 12 skills"></div>
+          </div>
+        </div>
+        <div class="demo-out">
+          <div class="demo-ats" id="demoAts">
+            <div class="top"><span class="t">ATS match report</span><span class="score" id="demoScore">0%</span></div>
+            <div class="bar"><span id="demoBar"></span></div>
+            <div>
+              <span class="kw hit">react</span><span class="kw hit">typescript</span><span class="kw hit">aws</span><span class="kw miss">kubernetes</span>
+            </div>
+          </div>
+          <div class="demo-paper" aria-hidden="true">
+            <div class="pseg"><h3>Alex Morgan</h3><div class="hd">Senior Frontend Engineer — React &amp; Cloud</div><div class="rule"></div></div>
+            <div class="pseg"><h4>Professional Summary</h4><p>Frontend engineer with five years shipping React applications at scale; AWS-certified, led TypeScript migrations across three product teams.</p></div>
+            <div class="pseg"><h4>Skills</h4><p class="sk">React · TypeScript · Node.js · AWS · CI/CD · Vite · GraphQL</p></div>
+            <div class="pseg"><h4>Experience</h4><ul><li>Cut CI build time 40% by parallelizing the test suite</li><li>Led TypeScript migration, reducing type defects 60%</li></ul></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ PIPELINE ============ -->
+  <section id="pipeline">
+    <div class="wrap">
+      <div class="sec-kicker rv">The pipeline</div>
+      <h2 class="sec-title rv rv-d1">Five agents. One document. Nothing hidden.</h2>
+      <p class="sec-sub rv rv-d2">Most resume tools are a form with a spinner. ARS-MME shows you the machinery — each agent reports what it produced before the next one starts.</p>
+
+      <div class="pipe">
+        <div class="pipe-row rv">
+          <div class="pipe-num">01</div>
+          <div><div class="pipe-name">Ingestion</div><div class="pipe-desc">Reads your PDF, image, or pasted text — OCR included. No template to fill in; bring the resume you already have.</div></div>
+          <div class="pipe-out">→ <b>resume.pdf · 214 words</b></div>
+        </div>
+        <div class="pipe-row rv">
+          <div class="pipe-num">02</div>
+          <div><div class="pipe-name">Verifier</div><div class="pipe-desc">Checks claimed certifications for internal consistency. Unverifiable claims block synthesis until you correct them — or sign an explicit disclaimer that travels with the document.</div></div>
+          <div class="pipe-out">→ <b>verified · confidence 0.94</b></div>
+        </div>
+        <div class="pipe-row rv">
+          <div class="pipe-num">03</div>
+          <div><div class="pipe-name">Market Scout</div><div class="pipe-desc">Pulls live listings from public job feeds, or maps demand trends for your target industry. Live data is labeled live; sample data is labeled sample.</div></div>
+          <div class="pipe-out">→ <b>31 live jobs · Remotive</b></div>
+        </div>
+        <div class="pipe-row rv">
+          <div class="pipe-num">04</div>
+          <div><div class="pipe-name">Analyst</div><div class="pipe-desc">Embeds your profile and the target role — on your device when your hardware allows — then computes the ATS match score and the exact keywords you're missing.</div></div>
+          <div class="pipe-out">→ <b>ATS match 78% · 3 gaps</b></div>
+        </div>
+        <div class="pipe-row rv">
+          <div class="pipe-num">05</div>
+          <div><div class="pipe-name">Synthesizer</div><div class="pipe-desc">Writes the document against a strict schema. It never invents employers, dates, or degrees — if a section can't be supported by your input, it stays honest or stays out.</div></div>
+          <div class="pipe-out">→ <b>4 roles · 12 skills · 0 fabrications</b></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DOCUMENT ============ -->
+  <section id="document" style="padding-top: 0;">
+    <div class="wrap">
+      <div class="sec-kicker rv">The deliverable</div>
+      <h2 class="sec-title rv rv-d1">A document, not app output.</h2>
+      <div class="doc-grid">
+        <div class="doc-points">
+          <div class="doc-point rv"><div class="dp-t">Set in a real serif, on real paper white</div><div class="dp-d">The resume renders in Source Serif 4 with print hierarchy — the one lit surface in a dark room. It reads like the thing you'd hand a recruiter, because it is.</div></div>
+          <div class="doc-point rv rv-d1"><div class="dp-t">Honest to the last line</div><div class="dp-d">If you override verification, the disclaimer is typeset into the document itself — fine print, like it should be.</div></div>
+          <div class="doc-point rv rv-d2"><div class="dp-t">Yours to take</div><div class="dp-d">Download as clean markdown, named after you, ready for any converter or ATS upload.</div><div class="dp-m">→ Alex_Morgan_resume.md</div></div>
+        </div>
+        <div class="rv rv-d2">
+          <div class="paper-lg">
+            <h3>Alex Morgan</h3>
+            <div class="hd">Senior Frontend Engineer — React &amp; Cloud Platforms</div>
+            <div class="ct">alex.morgan@email.com&ensp;|&ensp;+1 (555) 012-3456</div>
+            <div class="rule"></div>
+            <h4>Professional Summary</h4>
+            <p>Frontend engineer with five years of experience shipping React applications at scale. AWS-certified developer with a track record of cutting build times 40% and leading TypeScript migrations across three product teams.</p>
+            <h4>Skills</h4>
+            <p class="sk">React · TypeScript · Node.js · AWS · CI/CD · Vite · Testing Library · GraphQL</p>
+            <h4>Experience</h4>
+            <p style="font-weight:600">Senior Frontend Engineer — Various (5 years)</p>
+            <ul>
+              <li>Led TypeScript migration across 3 product teams, cutting type-related defects 60%</li>
+              <li>Reduced CI build time 40% by parallelizing the test suite</li>
+              <li>Earned AWS Certified Developer credential; owned the deployment pipeline</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CAPABILITIES ============ -->
+  <section style="padding-top: 0;">
+    <div class="wrap">
+      <div class="sec-kicker rv">Capabilities</div>
+      <h2 class="sec-title rv rv-d1">Built for the way hiring actually works.</h2>
+
+      <div style="margin-top: 40px;">
+        <div class="cap rv">
+          <div>
+            <div class="cap-t">ATS report you can act on</div>
+            <div class="cap-d">The first reader of your resume is a parser. The Analyst shows your match score and the exact keywords present and missing — not a vague grade, a work list.</div>
+            <div class="cap-m">cosine similarity · on-device embeddings when WebGPU allows</div>
+          </div>
+          <div class="cap-visual">
+            <div class="demo-ats show" style="opacity:1">
+              <div class="top"><span class="t">ATS match report</span><span class="score">78%</span></div>
+              <div class="bar"><span style="width:78%"></span></div>
+              <div>
+                <span class="kw hit">react</span><span class="kw hit">typescript</span><span class="kw hit">aws</span><span class="kw hit">ci/cd</span><span class="kw hit">testing</span><span class="kw miss">kubernetes</span><span class="kw miss">terraform</span><span class="kw miss">golang</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="cap flip rv">
+          <div class="cap-visual">
+            <div class="jobcard sel"><div class="jt">Senior React Engineer</div><div class="jc">Distributed-first SaaS</div><div class="jtag">live · remotive</div></div>
+            <div class="jobcard"><div class="jt">Frontend Platform Lead</div><div class="jc">Fintech scale-up</div><div class="jtag">live · arbeitnow</div></div>
+            <div class="jobcard" style="margin-bottom:0"><div class="jt">Cloud UI Engineer</div><div class="jc">Example listing</div><div class="jtag">sample data — labeled, never passed off as live</div></div>
+          </div>
+          <div>
+            <div class="cap-t">Market Mode targets real openings</div>
+            <div class="cap-d">Scan live job feeds, pick a listing, and the pipeline tailors the document to it. When a role wants skills you haven't evidenced, the gap interview asks you first — your answer only lands in the resume if you actually have one.</div>
+            <div class="cap-m">remotive · arbeitnow · honest labels on every source</div>
+          </div>
+        </div>
+
+        <div class="cap rv">
+          <div>
+            <div class="cap-t">A verifier with a spine</div>
+            <div class="cap-d">Claimed certifications get checked before anything is written. You can correct the details or override with a disclaimer — but you can't silently ship a claim the verifier couldn't stand behind.</div>
+            <div class="cap-m">block → correct → re-verify · or override with signed disclaimer</div>
+          </div>
+          <div class="cap-visual">
+            <div class="vline v-ok">✓&ensp;Credentials verified — confidence 0.94</div>
+            <div class="vline v-warn" style="margin-bottom:0">△&ensp;“AWS Solutions Architect” unverifiable — correct the details, or attach a disclaimer that prints on the document</div>
+          </div>
+        </div>
+
+        <div class="cap flip rv">
+          <div class="cap-visual">
+            <div class="ledger">
+              <div><span class="k">session.profile</span><span class="ok">purged</span></div>
+              <div><span class="k">session.contact (name·email·phone)</span><span class="ok">purged</span></div>
+              <div><span class="k">session.document</span><span class="ok">purged</span></div>
+              <div><span class="k">server-side copy</span><span class="ok">never existed</span></div>
+            </div>
+          </div>
+          <div>
+            <div class="cap-t">Zero retention, by architecture</div>
+            <div class="cap-d">There is no database to breach. Your profile, contact details, and generated document live in session memory and purge on timeout or close. The only thing that leaves your machine is the text you submit for generation.</div>
+            <div class="cap-m">15-min inactivity purge · purge-on-close · no accounts</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PRIVACY ============ -->
+  <section class="priv" id="privacy">
+    <div class="wrap priv-grid">
+      <div>
+        <div class="sec-kicker rv">Privacy ledger</div>
+        <h2 class="sec-title rv rv-d1">What we keep: nothing.</h2>
+        <p class="sec-sub rv rv-d2">Privacy claims are usually a policy page. Ours is an architecture decision — there is nowhere to store your data, so it isn't stored.</p>
+      </div>
+      <div class="priv-ledger rv rv-d2" role="table" aria-label="Privacy ledger">
+        <div><span class="k">accounts</span><span class="v"><b>none</b> — open the app, use it, leave</span></div>
+        <div><span class="k">server-side storage</span><span class="v"><b>none</b> — sessions are ephemeral by design</span></div>
+        <div><span class="k">session memory</span><span class="v">purged on close and after <b>15 min</b> idle</span></div>
+        <div><span class="k">embeddings</span><span class="v">computed <b>on your device</b> when hardware allows</span></div>
+        <div><span class="k">what leaves your machine</span><span class="v">only text you submit, to the model provider, for generation</span></div>
+        <div><span class="k">source</span><span class="v"><b>open</b> — audit every claim on GitHub</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FAQ ============ -->
+  <section id="faq">
+    <div class="wrap">
+      <div class="sec-kicker rv">Questions</div>
+      <h2 class="sec-title rv rv-d1">Asked and answered.</h2>
+      <div class="faq rv rv-d2">
+        <details>
+          <summary>Is it free?</summary>
+          <div class="a">Yes. No account, no card, no trial clock. The project is open source — you can also self-host the whole stack with your own model keys; the deployment guide covers it end to end.</div>
+        </details>
+        <details>
+          <summary>Where does my data actually go?</summary>
+          <div class="a">Your text is sent to the model provider (Gemini or NVIDIA) to generate the document, and nowhere else. Nothing is written to a database — the app doesn't have one. Session memory purges itself on close or after 15 minutes idle.</div>
+        </details>
+        <details>
+          <summary>Will it invent experience I don't have?</summary>
+          <div class="a">No. The Synthesizer writes against a strict schema that forbids inventing employers, dates, degrees, or certifications. If the Verifier can't stand behind a claim, generation blocks until you correct it — or you attach a disclaimer that is typeset into the document.</div>
+        </details>
+        <details>
+          <summary>What is an ATS match, and why should I care?</summary>
+          <div class="a">Applicant tracking systems parse your resume before a human reads it. The Analyst embeds your profile and the target role, computes their similarity, and lists the exact keywords you match and miss — so you fix the gaps before you send, not after the rejection.</div>
+        </details>
+        <details>
+          <summary>Why can I watch the agents work?</summary>
+          <div class="a">Because trust needs evidence. Every stage reports what it produced — what was extracted, what was verified, what matched. A resume built in the open is easier to stand behind than one that appears from a spinner.</div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CTA ============ -->
+  <section class="cta-band">
+    <div class="wrap inner">
+      <h2 class="rv">The first reader of your resume is a machine.<br><span style="color: var(--text-faint)">Send one it can read.</span></h2>
+      <a class="btn btn-primary rv rv-d1" href="/app/">Launch the engine</a>
+    </div>
+  </section>
+
+  <!-- ============ FOOTER ============ -->
+  <footer>
+    <div class="wrap">
+      <div class="foot-grid">
+        <div class="foot-brand">
+          <a class="brand" href="/"><span class="mark">AI</span>ARS-MME</a>
+          <p>Agentic Resume Synthesis &amp; Market Matching Engine. Five agents, one document, zero retention.</p>
+        </div>
+        <div class="foot-col">
+          <div class="h">Product</div>
+          <a href="/app/">Launch the engine</a>
+          <a href="#pipeline">The pipeline</a>
+          <a href="#privacy">Privacy ledger</a>
+          <a href="#faq">FAQ</a>
+        </div>
+        <div class="foot-col">
+          <div class="h">Source</div>
+          <a href="https://github.com/AtriDhar/Automatic_resume" rel="noopener">GitHub repository</a>
+          <a href="https://github.com/AtriDhar/Automatic_resume/blob/main/DEPLOYMENT_GUIDE.md" rel="noopener">Deployment guide</a>
+          <a href="https://github.com/AtriDhar/Automatic_resume/blob/main/DESIGN.md" rel="noopener">Design system</a>
+        </div>
+      </div>
+      <div class="fine">
+        <span>Generated documents are drafts — review before you send.</span>
+        <span>© 2026 ARS-MME</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      "use strict";
+      var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      /* Nav border on scroll */
+      var nav = document.getElementById("nav");
+      addEventListener("scroll", function () {
+        nav.classList.toggle("scrolled", scrollY > 8);
+      }, { passive: true });
+
+      /* Scroll reveals */
+      var revealed = document.querySelectorAll(".rv");
+      if (reduced || !("IntersectionObserver" in window)) {
+        revealed.forEach(function (el) { el.classList.add("in"); });
+      } else {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+          });
+        }, { threshold: 0.12, rootMargin: "0px 0px -40px 0px" });
+        revealed.forEach(function (el) { io.observe(el); });
+      }
+
+      /* ================= Hero demo: the pipeline, miniaturized =================
+         A state machine that mirrors the real console: stages activate, report
+         what they produced, complete; then the ATS report fills and the paper
+         assembles. Loops while visible; shows the finished state if the user
+         prefers reduced motion. */
+      var stages = Array.prototype.slice.call(document.querySelectorAll("#demo .stg"));
+      var psegs = Array.prototype.slice.call(document.querySelectorAll("#demo .pseg"));
+      var ats = document.getElementById("demoAts");
+      var bar = document.getElementById("demoBar");
+      var score = document.getElementById("demoScore");
+      var timers = [];
+      var running = false;
+      var visible = false;
+
+      function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
+      function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+      function typeDetail(el, text, done) {
+        var i = 0;
+        el.textContent = "";
+        (function tick() {
+          if (i <= text.length) {
+            el.textContent = text.slice(0, i);
+            i += 2;
+            timers.push(setTimeout(tick, 24));
+          } else if (done) { done(); }
+        })();
+      }
+
+      function finalState() {
+        stages.forEach(function (s) {
+          s.classList.add("done"); s.classList.remove("active");
+          s.querySelector(".s-detail").textContent = s.querySelector(".s-detail").getAttribute("data-detail");
+        });
+        ats.classList.add("show"); bar.style.width = "78%"; score.textContent = "78%";
+        psegs.forEach(function (p) { p.classList.add("show"); });
+      }
+
+      function reset() {
+        stages.forEach(function (s) {
+          s.classList.remove("done", "active");
+          s.querySelector(".s-detail").textContent = "";
+        });
+        ats.classList.remove("show"); bar.style.width = "0"; score.textContent = "0%";
+        psegs.forEach(function (p) { p.classList.remove("show"); });
+      }
+
+      function runStage(i) {
+        if (!visible) { running = false; return; }
+        if (i >= stages.length) { return finishRun(); }
+        var s = stages[i];
+        s.classList.add("active");
+        var detail = s.querySelector(".s-detail");
+        typeDetail(detail, detail.getAttribute("data-detail"), function () {
+          later(function () {
+            s.classList.remove("active");
+            s.classList.add("done");
+            /* the Analyst's completion is when the ATS report lands */
+            if (i === 3) {
+              ats.classList.add("show");
+              later(function () { bar.style.width = "78%"; }, 60);
+              var n = 0;
+              (function count() {
+                if (n <= 78) { score.textContent = n + "%"; n += 6; timers.push(setTimeout(count, 40)); }
+                else { score.textContent = "78%"; }
+              })();
+            }
+            runStage(i + 1);
+          }, 420);
+        });
+      }
+
+      function finishRun() {
+        psegs.forEach(function (p, i) { later(function () { p.classList.add("show"); }, 140 * i); });
+        later(function () {
+          if (!visible) { running = false; return; }
+          reset();
+          later(function () { runStage(0); }, 500);
+        }, 4600);
+      }
+
+      function start() {
+        if (running || reduced) return;
+        running = true;
+        reset();
+        later(function () { runStage(0); }, 400);
+      }
+
+      if (reduced) {
+        finalState();
+      } else if ("IntersectionObserver" in window) {
+        var demoIo = new IntersectionObserver(function (entries) {
+          visible = entries[0].isIntersecting;
+          if (visible && !running) start();
+          if (!visible) { clearTimers(); running = false; }
+        }, { threshold: 0.25 });
+        demoIo.observe(document.getElementById("demo"));
+        document.addEventListener("visibilitychange", function () {
+          if (document.hidden) { clearTimers(); running = false; }
+          else if (visible && !running) start();
+        });
+      } else {
+        finalState();
+      }
+    })();
+  </script>
+</body>
 </html>
